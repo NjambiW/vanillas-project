@@ -1,0 +1,5 @@
+{
+  "passed": false,
+  "ran_at": "2026-10-06T10:06:23Z",
+  "error": "RuntimeError: Could not construct RiskManager; edit make_risk()."
+}

@@ -1,0 +1,26 @@
+{
+  "generated": "2026-10-06T10:07:25Z",
+  "all_passed": false,
+  "checks": [
+    {
+      "gate": "Positive expectancy after markup, out of sample",
+      "passed": false,
+      "detail": "Missing reports/backtest_report.json. Export the out-of-sample report from run_backtest.py."
+    },
+    {
+      "gate": "Demo results consistent with backtest",
+      "passed": false,
+      "detail": "Demo review failed: Journal is empty."
+    },
+    {
+      "gate": "Kill switch tested on purpose",
+      "passed": false,
+      "detail": "Last drill failed: RuntimeError: Could not construct RiskManager; edit make_risk()."
+    },
+    {
+      "gate": "Real stake at the minimum",
+      "passed": false,
+      "detail": "Pass --real-stake and --min-stake."
+    }
+  ]
+}
