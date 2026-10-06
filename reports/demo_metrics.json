@@ -1,0 +1,35 @@
+{
+  "journal": "C:\\Users\\benne\\PycharmProjects\\vanillas project\\logs\\journal.db",
+  "generated": "2026-10-06T10:31:14Z",
+  "overall": {
+    "trades": 0,
+    "unsettled": 0
+  },
+  "signals_logged": 4,
+  "backtest": {},
+  "breakdowns": {},
+  "skips": {
+    "total": 4,
+    "by_reason": {
+      "markup #% is above the #% limit": 4
+    },
+    "gate_rejections": 4,
+    "gate_avg_markup": 17.349999999999998,
+    "gate_min_markup": 17.2
+  },
+  "flags": [
+    {
+      "severity": "HIGH",
+      "message": "No completed trades yet. 4 signals logged, 4 skipped."
+    },
+    {
+      "severity": "HIGH",
+      "message": "4 signals blocked by the premium gate; average quoted markup 17.3% (lowest 17.2%)."
+    },
+    {
+      "severity": "INFO",
+      "message": "No backtest numbers supplied; comparison skipped."
+    }
+  ],
+  "min_trades": 100
+}

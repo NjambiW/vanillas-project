@@ -16,15 +16,18 @@ You can also override from the command line: --bt-win-rate 0.52 --bt-expectancy 
 Outputs:
     reports/demo_review.md      human-readable review + weakness list
     reports/demo_metrics.json   machine-readable, used by go_live_gate.py
+
+Works with zero trades: it then reports the signals and skip reasons instead.
 """
 import argparse
 import csv
 import json
 import math
+import re
 import sqlite3
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,20 +35,17 @@ REPORTS = ROOT / "reports"
 MIN_TRADES = 100
 
 CANDIDATES = [
-    ROOT / "logs" / n
-    for n in ("journal.db", "journal.sqlite", "journal.csv", "trades.db", "trades.csv")
-] + [
-    ROOT / "data" / n
-    for n in ("journal.db", "journal.sqlite", "journal.csv", "trades.db", "trades.csv")
+    ROOT / folder / name
+    for folder in ("logs", "data")
+    for name in ("journal.db", "journal.sqlite", "journal.csv", "trades.db", "trades.csv")
 ]
 
 ALIASES = {
     "profit": ["profit", "pnl", "net_pnl", "result_pnl", "profit_loss", "pl"],
     "stake": ["stake", "buy_price", "cost", "ask_price", "ask"],
     "strategy": ["strategy", "strategy_name"],
-    "ts": ["ts", "time", "timestamp", "opened_at", "purchase_time", "created_at"],
-    "skip": ["skip_reason", "reason_for_skip", "skipped_reason", "reason"],
-    "side": ["direction", "side", "contract_type", "signal"],
+    "ts": ["ts_open", "ts", "time", "timestamp", "opened_at", "purchase_time", "created_at"],
+    "side": ["contract_type", "direction", "side", "signal"],
     "symbol": ["symbol", "underlying"],
 }
 
@@ -73,13 +73,17 @@ def pick(keys, field):
     return None
 
 
-def load_rows(path):
-    if path.suffix.lower() in (".db", ".sqlite", ".sqlite3"):
+def is_sqlite(path):
+    return path.suffix.lower() in (".db", ".sqlite", ".sqlite3")
+
+
+def load_trades(path):
+    """Returns (rows, columns). Rows may be empty."""
+    if is_sqlite(path):
         con = sqlite3.connect(str(path))
         con.row_factory = sqlite3.Row
+        tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")]
         best, best_n = None, -1
-        tables = [r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")]
         for t in tables:
             cols = [r[1] for r in con.execute(f'PRAGMA table_info("{t}")')]
             if pick(cols, "profit") is None:
@@ -88,12 +92,43 @@ def load_rows(path):
             if n > best_n:
                 best, best_n = t, n
         if best is None:
+            con.close()
             sys.exit(f"No table with a profit/pnl column in {path}. Tables: {tables}")
+        cols = [r[1] for r in con.execute(f'PRAGMA table_info("{best}")')]
         rows = [dict(r) for r in con.execute(f'SELECT * FROM "{best}"')]
         con.close()
-        return rows
+        return rows, cols
     with open(path, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        return rows, list(reader.fieldnames or [])
+
+
+def load_skip_reasons(path):
+    """Skip reasons from the journal's `skips` table (SQLite only)."""
+    if not is_sqlite(path):
+        return []
+    con = sqlite3.connect(str(path))
+    try:
+        names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "skips" not in names:
+            return []
+        return [r[0] or "" for r in con.execute("SELECT reason FROM skips")]
+    finally:
+        con.close()
+
+
+def count_signals(path):
+    if not is_sqlite(path):
+        return None
+    con = sqlite3.connect(str(path))
+    try:
+        names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "signals" not in names:
+            return None
+        return con.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+    finally:
+        con.close()
 
 
 def to_float(v):
@@ -106,6 +141,7 @@ def to_float(v):
 
 
 def parse_ts(v):
+    """Handles epoch seconds/ms and ISO strings (with or without timezone). Returns naive UTC."""
     if v is None or str(v).strip() == "":
         return None
     f = to_float(v)
@@ -113,16 +149,21 @@ def parse_ts(v):
         if f > 1e12:
             f /= 1000.0
         try:
-            return datetime.utcfromtimestamp(f)
+            return datetime.fromtimestamp(f, tz=timezone.utc).replace(tzinfo=None)
         except (OverflowError, OSError, ValueError):
             return None
-    s = str(v).replace("Z", "").replace("T", " ")
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-        try:
-            return datetime.strptime(s[:26], fmt)
-        except ValueError:
-            continue
-    return None
+    s = str(v).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def utcnow_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------- metrics
@@ -169,6 +210,24 @@ def win_rate_ci(p, n):
     return (max(0.0, p - half), min(1.0, p + half))
 
 
+def summarise_skips(reasons):
+    """Group skip reasons (numbers normalised) and pull out gate-rejection markups."""
+    grouped = Counter()
+    markups = []
+    for r in reasons:
+        grouped[re.sub(r"\d+(?:\.\d+)?", "#", r).strip() or "(blank)"] += 1
+        m = re.search(r"markup\s+([\d.]+)%\s+is above", r)
+        if m:
+            markups.append(float(m.group(1)))
+    return {
+        "total": len(reasons),
+        "by_reason": dict(grouped.most_common()),
+        "gate_rejections": len(markups),
+        "gate_avg_markup": (sum(markups) / len(markups)) if markups else None,
+        "gate_min_markup": min(markups) if markups else None,
+    }
+
+
 # ---------------------------------------------------------------- backtest
 def _norm_wr(v):
     v = to_float(v)
@@ -206,51 +265,67 @@ def load_backtest(path, overrides):
 # ---------------------------------------------------------------- review
 def review(journal=None, backtest=None, overrides=None):
     path = find_journal(journal)
-    rows = load_rows(path)
-    if not rows:
-        sys.exit("Journal is empty.")
-    keys = list(rows[0].keys())
+    rows, keys = load_trades(path)
     c = {f: pick(keys, f) for f in ALIASES}
     if c["profit"] is None:
         sys.exit(f"No profit column found. Columns: {keys}")
 
-    trades, skips = [], Counter()
+    settled, unsettled = [], 0
     for r in rows:
-        p = to_float(r.get(c["profit"]))
-        if p is None:
-            if c["skip"] and str(r.get(c["skip"]) or "").strip():
-                skips[str(r[c["skip"]]).strip()] += 1
-            continue
-        trades.append(r)
+        if to_float(r.get(c["profit"])) is None:
+            unsettled += 1  # still open, or settlement unknown
+        else:
+            settled.append(r)
 
-    pnls = [to_float(r[c["profit"]]) for r in trades]
-    stakes = [to_float(r.get(c["stake"])) for r in trades] if c["stake"] else None
+    pnls = [to_float(r[c["profit"]]) for r in settled]
+    stakes = [to_float(r.get(c["stake"])) for r in settled] if c["stake"] else None
     if stakes and any(s is None for s in stakes):
         stakes = None
     overall = compute_metrics(pnls, stakes)
+    overall["unsettled"] = unsettled
 
     breakdowns = {}
     for field in ("strategy", "side", "symbol"):
-        if not c[field]:
+        if not c[field] or not settled:
             continue
         groups = defaultdict(list)
-        for r in trades:
+        for r in settled:
             groups[str(r.get(c[field]))].append(to_float(r[c["profit"]]))
         breakdowns[field] = {k: compute_metrics(v) for k, v in groups.items()}
-    if c["ts"]:
+    if c["ts"] and settled:
         by_hour = defaultdict(list)
-        for r in trades:
+        for r in settled:
             t = parse_ts(r.get(c["ts"]))
             if t:
                 by_hour[f"{t.hour:02d}:00"].append(to_float(r[c["profit"]]))
         if by_hour:
             breakdowns["hour_utc"] = {k: compute_metrics(v) for k, v in sorted(by_hour.items())}
 
+    skips = summarise_skips(load_skip_reasons(path))
+    signals = count_signals(path)
+
     bt = load_backtest(backtest, overrides or {})
     flags = []  # (severity, message)
     n = overall["trades"]
-    if n < MIN_TRADES:
+
+    if n == 0:
+        msg = "No completed trades yet."
+        if signals is not None:
+            msg += f" {signals} signals logged, {skips['total']} skipped."
+        flags.append(("HIGH" if skips["gate_rejections"] else "INFO", msg))
+    elif n < MIN_TRADES:
         flags.append(("INFO", f"Only {n}/{MIN_TRADES} demo trades logged; sample too small for conclusions."))
+
+    if skips["gate_rejections"]:
+        flags.append((
+            "HIGH" if n == 0 else "MED",
+            f"{skips['gate_rejections']} signals blocked by the premium gate; average quoted markup "
+            f"{skips['gate_avg_markup']:.1f}% (lowest {skips['gate_min_markup']:.1f}%).",
+        ))
+    if signals and skips["total"] and n:
+        if skips["total"] > 5 * n:
+            flags.append(("INFO", f"{skips['total']} skipped signals vs {n} trades; check the gates are not too strict."))
+
     if n:
         lo, hi = win_rate_ci(overall["win_rate"], n)
         overall["win_rate_ci95"] = [lo, hi]
@@ -269,24 +344,23 @@ def review(journal=None, backtest=None, overrides=None):
         if "max_drawdown" in bt and overall["max_drawdown"] > 1.5 * bt["max_drawdown"]:
             flags.append(("MED", f"Demo max drawdown {overall['max_drawdown']:.2f} exceeds 1.5x backtest "
                                  f"({bt['max_drawdown']:.2f})."))
+        if unsettled:
+            flags.append(("MED", f"{unsettled} trades have no recorded profit (open or settlement unknown)."))
+        for field in ("strategy", "side"):
+            for k, m in breakdowns.get(field, {}).items():
+                if m["trades"] >= 20 and m["expectancy"] < 0:
+                    flags.append(("MED", f"{field} '{k}': {m['trades']} trades, expectancy {m['expectancy']:+.4f}."))
     if not bt:
         flags.append(("INFO", "No backtest numbers supplied; comparison skipped."))
 
-    for field in ("strategy", "side"):
-        for k, m in breakdowns.get(field, {}).items():
-            if m["trades"] >= 20 and m["expectancy"] < 0:
-                flags.append(("MED", f"{field} '{k}': {m['trades']} trades, expectancy {m['expectancy']:+.4f}."))
-    total_skips = sum(skips.values())
-    if total_skips and n and total_skips > 5 * n:
-        flags.append(("INFO", f"{total_skips} skipped signals vs {n} trades; check the gates are not too strict."))
-
     return {
         "journal": str(path),
-        "generated": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "generated": utcnow_iso(),
         "overall": overall,
+        "signals_logged": signals,
         "backtest": bt,
         "breakdowns": breakdowns,
-        "skip_reasons": dict(skips.most_common()),
+        "skips": skips,
         "flags": [{"severity": s, "message": m} for s, m in flags],
         "min_trades": MIN_TRADES,
     }
@@ -296,17 +370,16 @@ def _fmt(m):
     if not m.get("trades"):
         return "no trades"
     pf = m.get("profit_factor")
-    return (f"{m['trades']} trades | win {m['win_rate']:.1%} | exp {m['expectancy']:+.4f} | "
-            f"PF {pf:.2f}" if pf is not None else
-            f"{m['trades']} trades | win {m['win_rate']:.1%} | exp {m['expectancy']:+.4f} | PF n/a")
+    pf_txt = f"{pf:.2f}" if pf is not None else "n/a"
+    return f"{m['trades']} trades | win {m['win_rate']:.1%} | exp {m['expectancy']:+.4f} | PF {pf_txt}"
 
 
 def write_reports(res):
     REPORTS.mkdir(exist_ok=True)
     (REPORTS / "demo_metrics.json").write_text(json.dumps(res, indent=2), encoding="utf-8")
-    o, bt = res["overall"], res["backtest"]
+    o, bt, sk = res["overall"], res["backtest"], res["skips"]
     L = ["# Demo forward test review", "", f"Generated {res['generated']}  ", f"Journal: `{res['journal']}`", "",
-         f"## Overall ({o['trades']}/{res['min_trades']} trades)", ""]
+         f"## Overall ({o['trades']}/{res['min_trades']} settled trades)", ""]
     if o["trades"]:
         L += [f"- Win rate: {o['win_rate']:.1%} (95% interval {o['win_rate_ci95'][0]:.1%} to {o['win_rate_ci95'][1]:.1%})",
               f"- Total P&L: {o['total_pnl']:+.2f}", f"- Expectancy per trade: {o['expectancy']:+.4f}",
@@ -315,6 +388,12 @@ def write_reports(res):
               f"- Max drawdown: {o['max_drawdown']:.2f}", f"- Longest losing streak: {o['longest_losing_streak']}"]
         if "return_per_stake" in o:
             L.append(f"- Return per unit staked: {o['return_per_stake']:+.2%}")
+    else:
+        L.append("- No settled trades yet.")
+    if o.get("unsettled"):
+        L.append(f"- Unsettled / unknown: {o['unsettled']}")
+    if res["signals_logged"] is not None:
+        L.append(f"- Signals logged: {res['signals_logged']}")
     L += ["", "## Backtest reference", ""]
     L += [f"- {k}: {v}" for k, v in bt.items()] or ["- none supplied"]
     L += ["", "## Breakdowns", ""]
@@ -322,8 +401,10 @@ def write_reports(res):
         L.append(f"**{field}**")
         L += [f"- {k}: {_fmt(m)}" for k, m in groups.items()]
         L.append("")
-    if res["skip_reasons"]:
-        L += ["## Skip reasons", ""] + [f"- {k}: {v}" for k, v in res["skip_reasons"].items()] + [""]
+    if sk["total"]:
+        L += [f"## Skipped signals ({sk['total']})", ""]
+        L += [f"- {k}: {v}" for k, v in sk["by_reason"].items()]
+        L.append("")
     L += ["## Weakness list (candidates for our joint review)", ""]
     L += [f"- [{f['severity']}] {f['message']}" for f in res["flags"]] or ["- nothing flagged"]
     L += ["", "Rule: change one thing at a time, then re-run the demo and this review.", ""]
@@ -344,7 +425,7 @@ def main():
         "profit_factor": a.bt_profit_factor, "max_drawdown": a.bt_max_drawdown})
     write_reports(res)
     o = res["overall"]
-    print(f"Demo trades: {o['trades']}/{MIN_TRADES}")
+    print(f"Settled demo trades: {o['trades']}/{MIN_TRADES}")
     if o["trades"]:
         print(_fmt(o))
     for f in res["flags"]:

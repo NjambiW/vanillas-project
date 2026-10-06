@@ -1,9 +1,19 @@
 """Turns a strategy Signal into (at most) one Deriv vanilla trade, and follows it to settlement.
 
 Flow for each signal:
-    risk approval -> pick expiry and strike -> get a fresh proposal -> price gate
-    -> buy (unless DRY_RUN) -> watch the contract until it settles -> record the result
+    risk approval -> rank nearby strikes -> quote each -> price gate on each
+    -> buy the cheapest (lowest markup) one that passes (unless DRY_RUN)
+    -> watch the contract until it settles -> record the result
 Every refusal is written to the journal with its reason.
+
+Changes in this version:
+  * Instead of quoting only the single closest barrier, the executor quotes the
+    `max_candidates` closest barriers and buys the one with the lowest markup that
+    passes the premium gate. This is what the backtest now assumes too.
+  * Settlement is no longer recorded the instant `is_expired` appears. The watcher waits
+    (up to `expiry_grace` seconds) for the contract to be sold / marked won or lost, so the
+    profit recorded is the final settled figure. If the final message never comes it falls
+    back to the latest expired update.
 """
 import asyncio
 import logging
@@ -20,6 +30,7 @@ from strategies.base import Signal, Strategy
 log = logging.getLogger("executor")
 
 MAX_CONSECUTIVE_ERRORS = 3
+FINAL_STATUSES = ("sold", "won", "lost")
 
 
 def seconds_to_duration(seconds: int) -> tuple:
@@ -45,8 +56,25 @@ def pick_barrier(allowed: list, wanted_offset: float, spot: float = 0.0) -> str:
     return min(allowed, key=lambda b: abs(barrier_offset(b, spot) - wanted_offset))
 
 
+def rank_barriers(allowed: list, wanted_offset: float, spot: float, count: int) -> list:
+    """The `count` allowed barriers closest to the wanted offset, nearest first."""
+    ranked = sorted(allowed, key=lambda b: abs(barrier_offset(b, spot) - wanted_offset))
+    seen, out = set(), []
+    for b in ranked:
+        if b not in seen:
+            seen.add(b)
+            out.append(b)
+        if len(out) >= max(1, count):
+            break
+    return out
+
+
 def _truthy(value) -> bool:
     return value in (1, True, "1", "true", "True")
+
+
+def _is_final(poc: dict) -> bool:
+    return _truthy(poc.get("is_sold")) or str(poc.get("status", "")).lower() in FINAL_STATUSES
 
 
 class Executor:
@@ -61,12 +89,16 @@ class Executor:
         granularity: int,
         dry_run: bool = True,
         settle_buffer: float = 120.0,
+        max_candidates: int = 3,
+        expiry_grace: float = 15.0,
     ):
         self.client, self.strategy, self.risk = client, strategy, risk
         self.gate, self.journal = gate, journal
         self.symbol, self.granularity = symbol, granularity
         self.dry_run = dry_run
         self.settle_buffer = settle_buffer
+        self.max_candidates = max_candidates
+        self.expiry_grace = expiry_grace
         self._lock = asyncio.Lock()
         self._tasks: set = set()
         self._errors = 0
@@ -115,26 +147,35 @@ class Executor:
             signal.contract_type, self.symbol, duration, unit, decision.stake, currency
         )
         offset = signal.strike_distance if signal.direction == "CALL" else -signal.strike_distance
-        barrier = pick_barrier(allowed, offset, price)
+        candidates = rank_barriers(allowed, offset, price, self.max_candidates)
 
-        proposal = await self.client.get_proposal(
-            signal.contract_type, self.symbol, barrier, duration, unit, decision.stake, currency
-        )
         stake = decision.stake
-        min_stake, max_stake = proposal.get("min_stake"), proposal.get("max_stake")
-        if min_stake is not None and stake < float(min_stake):
-            skip(f"stake {stake} is below Deriv's minimum {min_stake}")
-            return None
-        if max_stake is not None and stake > float(max_stake):
-            skip(f"stake {stake} is above Deriv's maximum {max_stake}")
-            return None
+        best = None  # (barrier, proposal, verdict) with the lowest markup that passes
+        rejections = []
+        for barrier in candidates:
+            proposal = await self.client.get_proposal(
+                signal.contract_type, self.symbol, barrier, duration, unit, stake, currency
+            )
+            min_stake, max_stake = proposal.get("min_stake"), proposal.get("max_stake")
+            if min_stake is not None and stake < float(min_stake):
+                rejections.append(f"{barrier}: stake {stake} is below Deriv's minimum {min_stake}")
+                continue
+            if max_stake is not None and stake > float(max_stake):
+                rejections.append(f"{barrier}: stake {stake} is above Deriv's maximum {max_stake}")
+                continue
+            verdict = self.gate.check(
+                signal.contract_type, proposal, price, barrier, duration, unit, self.symbol
+            )
+            if not verdict.allowed:
+                rejections.append(f"{barrier}: {verdict.reason}")
+                continue
+            if best is None or verdict.markup_pct < best[2].markup_pct:
+                best = (barrier, proposal, verdict)
 
-        verdict = self.gate.check(
-            signal.contract_type, proposal, price, barrier, duration, unit, self.symbol
-        )
-        if not verdict.allowed:
-            skip(verdict.reason)
+        if best is None:
+            skip(" | ".join(rejections) if rejections else "no usable barrier")
             return None
+        barrier, proposal, verdict = best
 
         if self.dry_run:
             skip(
@@ -180,12 +221,20 @@ class Executor:
     # ------------------------------------------------------- follow to settlement
     async def _watch(self, contract_id, trade_id: int, expiry_seconds: float) -> None:
         loop = asyncio.get_running_loop()
-        done: asyncio.Future = loop.create_future()
+        final: asyncio.Future = loop.create_future()     # sold / won / lost
+        expired: asyncio.Future = loop.create_future()   # is_expired seen, final may follow
+        latest = {"poc": None}
 
         def on_update(msg: dict) -> None:
             poc = msg.get("proposal_open_contract") or {}
-            if (_truthy(poc.get("is_sold")) or _truthy(poc.get("is_expired"))) and not done.done():
-                done.set_result(poc)
+            if _is_final(poc):
+                latest["poc"] = poc
+                if not final.done():
+                    final.set_result(poc)
+            elif _truthy(poc.get("is_expired")):
+                latest["poc"] = poc
+                if not expired.done():
+                    expired.set_result(True)
 
         sub_id = None
         try:
@@ -193,7 +242,10 @@ class Executor:
                 {"proposal_open_contract": 1, "contract_id": contract_id}, on_update
             )
             sub_id = (first.get("subscription") or {}).get("id")
-            poc = await asyncio.wait_for(done, expiry_seconds + self.settle_buffer)
+            poc = await asyncio.wait_for(
+                self._await_settlement(final, expired, latest),
+                expiry_seconds + self.settle_buffer,
+            )
         except Exception as exc:  # noqa: BLE001  timeout, API error, dropped connection, anything
             poc = await self._last_chance_check(contract_id, exc)
         finally:
@@ -215,6 +267,16 @@ class Executor:
         self.risk.on_trade_closed(profit)
         log.info("SETTLED contract %s profit %.2f", contract_id, profit)
 
+    async def _await_settlement(self, final, expired, latest) -> Optional[dict]:
+        """Wait for the final message; after expiry, give it `expiry_grace` seconds to arrive."""
+        await asyncio.wait({final, expired}, return_when=asyncio.FIRST_COMPLETED)
+        if not final.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(final), self.expiry_grace)
+            except asyncio.TimeoutError:
+                log.warning("no final settlement message after expiry, using the latest expired update")
+        return final.result() if final.done() else latest["poc"]
+
     async def _last_chance_check(self, contract_id, original_error) -> Optional[dict]:
         """One direct lookup before giving up on a contract."""
         log.warning("watching contract %s failed (%r), checking directly", contract_id, original_error)
@@ -223,7 +285,7 @@ class Executor:
         except Exception:  # noqa: BLE001
             return None
         poc = resp.get("proposal_open_contract") or {}
-        return poc if (_truthy(poc.get("is_sold")) or _truthy(poc.get("is_expired"))) else None
+        return poc if (_is_final(poc) or _truthy(poc.get("is_expired"))) else None
 
 
 def _to_float(value) -> Optional[float]:

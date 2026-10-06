@@ -2,9 +2,13 @@
 
 Starts in DRY_RUN mode (see config.py): it watches the market, finds signals, prices them
 and logs what it WOULD do, without buying. Set DRY_RUN = False to trade on your demo account.
+
+For a long demo forward test use:  python src/run_demo_forward.py
+(it calls main() below with DRY_RUN switched off and a stop event, and prints performance).
 """
 import asyncio
 import logging
+from typing import Optional
 
 from config import (
     CANDLE_SECONDS,
@@ -54,7 +58,8 @@ async def status_loop(client: DerivClient, risk: RiskManager, journal: Journal) 
             log.exception("status check failed")
 
 
-async def main() -> None:
+async def main(stop_event: Optional[asyncio.Event] = None) -> None:
+    """Run the bot until Ctrl+C, or until `stop_event` is set (if one is given)."""
     setup_logging()
     strategy = get_strategy(STRATEGY_NAME)
     plan_params = {"fraction": RISK_FRACTION} if STAKING_PLAN == "fixed_fraction" else {}
@@ -85,7 +90,7 @@ async def main() -> None:
     status = asyncio.create_task(status_loop(client, risk, journal))
 
     try:
-        await asyncio.Event().wait()  # run until interrupted
+        await (stop_event or asyncio.Event()).wait()  # run until interrupted or told to stop
     finally:
         status.cancel()
         await feed.stop()

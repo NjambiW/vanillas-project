@@ -1,4 +1,5 @@
 """Trend pullback: buy the bounce back into a confirmed trend."""
+import numpy as np
 import pandas as pd
 
 from indicators import atr, ema
@@ -10,17 +11,20 @@ class TrendPullback(Strategy):
     Uptrend:  fast EMA above slow EMA, slow EMA rising, gap wider than min_trend_atr * ATR.
     Trigger:  price had closed below the fast EMA and now closes back above it -> CALL.
     Downtrend is the mirror image -> PUT.
+    Cooldown: after a signal, further signals are suppressed for `cooldown_candles` candles
+              (defaults to hold_candles, i.e. no new signal while the trade would still be open).
     The default numbers are starting points to be tuned by backtesting, not facts.
     """
 
     name = "trend_pullback"
 
     def __init__(self, fast=20, slow=50, slope_lookback=5, min_trend_atr=0.2,
-                 hold_candles=5, strike_atr=0.7):
+                 hold_candles=5, strike_atr=0.7, cooldown_candles=None):
         super().__init__(hold_candles, strike_atr)
         self.fast, self.slow = fast, slow
         self.slope_lookback = slope_lookback
         self.min_trend_atr = min_trend_atr
+        self.cooldown_candles = hold_candles if cooldown_candles is None else cooldown_candles
 
     @property
     def warmup(self) -> int:
@@ -42,4 +46,16 @@ class TrendPullback(Strategy):
         out = pd.Series(0, index=candles.index)
         out.loc[uptrend & reclaim_up] = 1
         out.loc[downtrend & reclaim_down] = -1
-        return out
+        return self._apply_cooldown(out)
+
+    def _apply_cooldown(self, signals: pd.Series) -> pd.Series:
+        if self.cooldown_candles <= 0:
+            return signals
+        values = signals.to_numpy().copy()
+        last = -10 ** 9
+        for pos in np.flatnonzero(values):
+            if pos - last < self.cooldown_candles:
+                values[pos] = 0
+            else:
+                last = pos
+        return pd.Series(values, index=signals.index)

@@ -1,5 +1,40 @@
 {
-  "passed": false,
-  "ran_at": "2026-10-06T10:06:23Z",
-  "error": "RuntimeError: Could not construct RiskManager; edit make_risk()."
+  "passed": true,
+  "ran_at": "2026-10-06T10:38:07Z",
+  "halted_after_losses": 6,
+  "checks": [
+    {
+      "check": "consecutive-loss halt",
+      "passed": true,
+      "detail": "halted after 6 consecutive losses and stayed halted"
+    },
+    {
+      "check": "daily loss limit halt",
+      "passed": true,
+      "detail": "daily loss limit fired after losing 305.00 (limit 3.0% of start balance)"
+    },
+    {
+      "check": "manual halt()",
+      "passed": true,
+      "detail": "halt() blocks trading"
+    },
+    {
+      "check": "STOP kill file",
+      "passed": true,
+      "detail": "STOP file blocks trading and deleting it resumes"
+    },
+    {
+      "check": "automatic halt clears next UTC day",
+      "passed": true,
+      "detail": "automatic halt clears at the next UTC day"
+    },
+    {
+      "check": "max open positions",
+      "passed": true,
+      "detail": "max_open_positions=1 enforced"
+    }
+  ],
+  "warnings": [
+    "A halt is held in memory only: restarting the bot clears the halt, the daily loss tally and the consecutive-loss count."
+  ]
 }
