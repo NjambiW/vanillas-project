@@ -1,34 +1,380 @@
 {
   "journal": "C:\\Users\\benne\\PycharmProjects\\vanillas project\\logs\\journal.db",
-  "generated": "2026-10-06T10:31:14Z",
+  "generated": "2026-10-07T11:34:43Z",
   "overall": {
-    "trades": 0,
-    "unsettled": 0
+    "trades": 36,
+    "wins": 10,
+    "losses": 26,
+    "win_rate": 0.2777777777777778,
+    "total_pnl": -278.38,
+    "expectancy": -7.732777777777778,
+    "avg_win": 32.92100000000001,
+    "avg_loss": -23.368846153846157,
+    "profit_factor": 0.5418291940288682,
+    "max_drawdown": 278.38,
+    "longest_losing_streak": 8,
+    "return_per_stake": -0.3093111111111111,
+    "roi": -0.3093111111111111,
+    "roi_se": 0.2136390693780673,
+    "max_drawdown_units": 11.135199999999998,
+    "gross_roi": -0.23387434777777777,
+    "gross_t_stat": -0.9867759671143007,
+    "avg_markup_pct": 10.909722222222221,
+    "unsettled": 1,
+    "win_rate_ci95": [
+      0.13146272975310042,
+      0.42409282580245516
+    ]
   },
-  "signals_logged": 4,
+  "signals_logged": 94,
   "backtest": {},
-  "breakdowns": {},
-  "skips": {
-    "total": 4,
-    "by_reason": {
-      "markup #% is above the #% limit": 4
+  "breakdowns": {
+    "strategy": {
+      "trend_pullback": {
+        "trades": 36,
+        "wins": 10,
+        "losses": 26,
+        "win_rate": 0.2777777777777778,
+        "total_pnl": -278.38,
+        "expectancy": -7.732777777777778,
+        "avg_win": 32.92100000000001,
+        "avg_loss": -23.368846153846157,
+        "profit_factor": 0.5418291940288682,
+        "max_drawdown": 278.38,
+        "longest_losing_streak": 8
+      }
     },
-    "gate_rejections": 4,
-    "gate_avg_markup": 17.349999999999998,
+    "side": {
+      "VANILLALONGPUT": {
+        "trades": 21,
+        "wins": 4,
+        "losses": 17,
+        "win_rate": 0.19047619047619047,
+        "total_pnl": -317.22,
+        "expectancy": -15.105714285714287,
+        "avg_win": 19.1575,
+        "avg_loss": -23.16764705882353,
+        "profit_factor": 0.19456645931192076,
+        "max_drawdown": 317.22,
+        "longest_losing_streak": 9
+      },
+      "VANILLALONGCALL": {
+        "trades": 15,
+        "wins": 6,
+        "losses": 9,
+        "win_rate": 0.4,
+        "total_pnl": 38.84000000000001,
+        "expectancy": 2.589333333333334,
+        "avg_win": 42.09666666666667,
+        "avg_loss": -23.74888888888889,
+        "profit_factor": 1.1817161036773651,
+        "max_drawdown": 79.33,
+        "longest_losing_streak": 3
+      }
+    },
+    "symbol": {
+      "1HZ100V": {
+        "trades": 36,
+        "wins": 10,
+        "losses": 26,
+        "win_rate": 0.2777777777777778,
+        "total_pnl": -278.38,
+        "expectancy": -7.732777777777778,
+        "avg_win": 32.92100000000001,
+        "avg_loss": -23.368846153846157,
+        "profit_factor": 0.5418291940288682,
+        "max_drawdown": 278.38,
+        "longest_losing_streak": 8
+      }
+    },
+    "duration": {
+      "5m": {
+        "trades": 36,
+        "wins": 10,
+        "losses": 26,
+        "win_rate": 0.2777777777777778,
+        "total_pnl": -278.38,
+        "expectancy": -7.732777777777778,
+        "avg_win": 32.92100000000001,
+        "avg_loss": -23.368846153846157,
+        "profit_factor": 0.5418291940288682,
+        "max_drawdown": 278.38,
+        "longest_losing_streak": 8
+      }
+    },
+    "hour_utc": {
+      "01:00": {
+        "trades": 1,
+        "wins": 0,
+        "losses": 1,
+        "win_rate": 0.0,
+        "total_pnl": -25.0,
+        "expectancy": -25.0,
+        "avg_win": 0.0,
+        "avg_loss": -25.0,
+        "profit_factor": 0.0,
+        "max_drawdown": 25.0,
+        "longest_losing_streak": 1
+      },
+      "02:00": {
+        "trades": 3,
+        "wins": 2,
+        "losses": 1,
+        "win_rate": 0.6666666666666666,
+        "total_pnl": 3.4699999999999998,
+        "expectancy": 1.1566666666666665,
+        "avg_win": 14.235,
+        "avg_loss": -25.0,
+        "profit_factor": 1.1388,
+        "max_drawdown": 25.0,
+        "longest_losing_streak": 1
+      },
+      "03:00": {
+        "trades": 2,
+        "wins": 1,
+        "losses": 1,
+        "win_rate": 0.5,
+        "total_pnl": 103.68,
+        "expectancy": 51.84,
+        "avg_win": 128.68,
+        "avg_loss": -25.0,
+        "profit_factor": 5.147200000000001,
+        "max_drawdown": 25.0,
+        "longest_losing_streak": 1
+      },
+      "04:00": {
+        "trades": 3,
+        "wins": 1,
+        "losses": 2,
+        "win_rate": 0.3333333333333333,
+        "total_pnl": -29.33,
+        "expectancy": -9.776666666666666,
+        "avg_win": 14.98,
+        "avg_loss": -22.155,
+        "profit_factor": 0.3380726698262243,
+        "max_drawdown": 29.33,
+        "longest_losing_streak": 1
+      },
+      "05:00": {
+        "trades": 3,
+        "wins": 0,
+        "losses": 3,
+        "win_rate": 0.0,
+        "total_pnl": -75.0,
+        "expectancy": -25.0,
+        "avg_win": 0.0,
+        "avg_loss": -25.0,
+        "profit_factor": 0.0,
+        "max_drawdown": 75.0,
+        "longest_losing_streak": 3
+      },
+      "06:00": {
+        "trades": 2,
+        "wins": 0,
+        "losses": 2,
+        "win_rate": 0.0,
+        "total_pnl": -50.0,
+        "expectancy": -25.0,
+        "avg_win": 0.0,
+        "avg_loss": -25.0,
+        "profit_factor": 0.0,
+        "max_drawdown": 50.0,
+        "longest_losing_streak": 2
+      },
+      "07:00": {
+        "trades": 1,
+        "wins": 0,
+        "losses": 1,
+        "win_rate": 0.0,
+        "total_pnl": -25.0,
+        "expectancy": -25.0,
+        "avg_win": 0.0,
+        "avg_loss": -25.0,
+        "profit_factor": 0.0,
+        "max_drawdown": 25.0,
+        "longest_losing_streak": 1
+      },
+      "08:00": {
+        "trades": 1,
+        "wins": 0,
+        "losses": 1,
+        "win_rate": 0.0,
+        "total_pnl": -25.0,
+        "expectancy": -25.0,
+        "avg_win": 0.0,
+        "avg_loss": -25.0,
+        "profit_factor": 0.0,
+        "max_drawdown": 25.0,
+        "longest_losing_streak": 1
+      },
+      "09:00": {
+        "trades": 1,
+        "wins": 1,
+        "losses": 0,
+        "win_rate": 1.0,
+        "total_pnl": 17.03,
+        "expectancy": 17.03,
+        "avg_win": 17.03,
+        "avg_loss": 0.0,
+        "profit_factor": null,
+        "max_drawdown": 0.0,
+        "longest_losing_streak": 0
+      },
+      "10:00": {
+        "trades": 1,
+        "wins": 1,
+        "losses": 0,
+        "win_rate": 1.0,
+        "total_pnl": 6.72,
+        "expectancy": 6.72,
+        "avg_win": 6.72,
+        "avg_loss": 0.0,
+        "profit_factor": null,
+        "max_drawdown": 0.0,
+        "longest_losing_streak": 0
+      },
+      "11:00": {
+        "trades": 3,
+        "wins": 0,
+        "losses": 3,
+        "win_rate": 0.0,
+        "total_pnl": -75.0,
+        "expectancy": -25.0,
+        "avg_win": 0.0,
+        "avg_loss": -25.0,
+        "profit_factor": 0.0,
+        "max_drawdown": 75.0,
+        "longest_losing_streak": 3
+      },
+      "14:00": {
+        "trades": 1,
+        "wins": 0,
+        "losses": 1,
+        "win_rate": 0.0,
+        "total_pnl": -25.0,
+        "expectancy": -25.0,
+        "avg_win": 0.0,
+        "avg_loss": -25.0,
+        "profit_factor": 0.0,
+        "max_drawdown": 25.0,
+        "longest_losing_streak": 1
+      },
+      "15:00": {
+        "trades": 1,
+        "wins": 1,
+        "losses": 0,
+        "win_rate": 1.0,
+        "total_pnl": 3.63,
+        "expectancy": 3.63,
+        "avg_win": 3.63,
+        "avg_loss": 0.0,
+        "profit_factor": null,
+        "max_drawdown": 0.0,
+        "longest_losing_streak": 0
+      },
+      "18:00": {
+        "trades": 2,
+        "wins": 0,
+        "losses": 2,
+        "win_rate": 0.0,
+        "total_pnl": -50.0,
+        "expectancy": -25.0,
+        "avg_win": 0.0,
+        "avg_loss": -25.0,
+        "profit_factor": 0.0,
+        "max_drawdown": 50.0,
+        "longest_losing_streak": 2
+      },
+      "20:00": {
+        "trades": 5,
+        "wins": 1,
+        "losses": 4,
+        "win_rate": 0.2,
+        "total_pnl": -33.839999999999996,
+        "expectancy": -6.767999999999999,
+        "avg_win": 44.53,
+        "avg_loss": -19.5925,
+        "profit_factor": 0.5682021181574582,
+        "max_drawdown": 78.37,
+        "longest_losing_streak": 4
+      },
+      "21:00": {
+        "trades": 3,
+        "wins": 2,
+        "losses": 1,
+        "win_rate": 0.6666666666666666,
+        "total_pnl": 69.69,
+        "expectancy": 23.23,
+        "avg_win": 42.585,
+        "avg_loss": -15.48,
+        "profit_factor": 5.501937984496124,
+        "max_drawdown": 15.48,
+        "longest_losing_streak": 1
+      },
+      "22:00": {
+        "trades": 1,
+        "wins": 0,
+        "losses": 1,
+        "win_rate": 0.0,
+        "total_pnl": -25.0,
+        "expectancy": -25.0,
+        "avg_win": 0.0,
+        "avg_loss": -25.0,
+        "profit_factor": 0.0,
+        "max_drawdown": 25.0,
+        "longest_losing_streak": 1
+      },
+      "23:00": {
+        "trades": 2,
+        "wins": 0,
+        "losses": 2,
+        "win_rate": 0.0,
+        "total_pnl": -44.43,
+        "expectancy": -22.215,
+        "avg_win": 0.0,
+        "avg_loss": -22.215,
+        "profit_factor": 0.0,
+        "max_drawdown": 44.43,
+        "longest_losing_streak": 2
+      }
+    }
+  },
+  "skips": {
+    "total": 57,
+    "by_reason": {
+      "DRY RUN: would buy VANILLALONGPUT #m barrier +# stake # (markup #%)": 24,
+      "DRY RUN: would buy VANILLALONGCALL #m barrier +# stake # (markup #%)": 17,
+      "markup #% is above the #% limit": 12,
+      "a trade is already open": 4
+    },
+    "gate_rejections": 12,
+    "gate_avg_markup": 17.3,
     "gate_min_markup": 17.2
   },
   "flags": [
     {
-      "severity": "HIGH",
-      "message": "No completed trades yet. 4 signals logged, 4 skipped."
+      "severity": "INFO",
+      "message": "Only 36/100 demo trades logged; sample too small for conclusions."
     },
     {
-      "severity": "HIGH",
-      "message": "4 signals blocked by the premium gate; average quoted markup 17.3% (lowest 17.2%)."
+      "severity": "MED",
+      "message": "12 signals blocked by the premium gate; average quoted markup 17.3% (lowest 17.2%)."
+    },
+    {
+      "severity": "MED",
+      "message": "1 trades have no recorded profit (open or settlement unknown)."
+    },
+    {
+      "severity": "MED",
+      "message": "strategy 'trend_pullback': 36 trades, expectancy -7.7328."
+    },
+    {
+      "severity": "MED",
+      "message": "side 'VANILLALONGPUT': 21 trades, expectancy -15.1057."
     },
     {
       "severity": "INFO",
-      "message": "No backtest numbers supplied; comparison skipped."
+      "message": "No backtest numbers supplied; comparison skipped. Create them with: python src/run_backtest.py --strategy NAME --hold N --export"
     }
   ],
   "min_trades": 100

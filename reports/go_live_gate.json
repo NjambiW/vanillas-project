@@ -1,26 +1,26 @@
 {
-  "generated": "2026-10-06T10:07:25Z",
+  "generated": "2026-10-07T11:15:44Z",
   "all_passed": false,
   "checks": [
     {
-      "gate": "Positive expectancy after markup, out of sample",
+      "gate": "Real edge after markup, out of sample",
       "passed": false,
-      "detail": "Missing reports/backtest_report.json. Export the out-of-sample report from run_backtest.py."
+      "detail": "Missing reports/backtest_report.json. Create it: python src/run_backtest.py --strategy NAME --hold N --export"
     },
     {
       "gate": "Demo results consistent with backtest",
       "passed": false,
-      "detail": "Demo review failed: Journal is empty."
+      "detail": "35/100 demo trades logged."
     },
     {
       "gate": "Kill switch tested on purpose",
       "passed": false,
-      "detail": "Last drill failed: RuntimeError: Could not construct RiskManager; edit make_risk()."
+      "detail": "Could not read config.py (cannot import name 'settings_fingerprint' from 'risk' (C:\\Users\\benne\\PycharmProjects\\vanillas project\\src\\risk.py))."
     },
     {
       "gate": "Real stake at the minimum",
       "passed": false,
-      "detail": "Pass --real-stake and --min-stake."
+      "detail": "Could not read config.py (module 'config' has no attribute 'FIXED_STAKE')."
     }
   ]
 }
