@@ -105,3 +105,18 @@ def test_stake_gate_reads_config_values():
     assert gate_stake({"plan": "fixed", "fixed_stake": 1.0, "min_stake": 1.0})[0]
     assert not gate_stake({"plan": "fixed_fraction", "fixed_stake": 1.0, "min_stake": 1.0})[0]
     assert not gate_stake({"plan": "fixed", "fixed_stake": 5.0, "min_stake": 1.0})[0]
+
+
+def test_the_backtests_own_verdict_must_be_confirmed():
+    with tempfile.TemporaryDirectory() as tmp:
+        ok, why = oos(tmp, good_report(verdict="CANDIDATE*"))
+    assert not ok and "verdict" in why
+    with tempfile.TemporaryDirectory() as tmp:
+        ok, why = oos(tmp, good_report(verdict="CONFIRMED"))
+    assert ok, why
+
+
+def test_a_bootstrap_interval_that_includes_zero_fails():
+    with tempfile.TemporaryDirectory() as tmp:
+        ok, why = oos(tmp, good_report(out_of_sample={"trades": 150, "roi": 0.06, "p_value": 0.01, "ci_low": -0.02}))
+    assert not ok and "bootstrap" in why

@@ -14,8 +14,10 @@ from strategies.base import Signal
 class FakeClient:
     """Stands in for DerivClient and records what the executor asked for."""
 
-    def __init__(self, markup_pct=5.0):
+    def __init__(self, markup_pct=5.0, markup_by_barrier=None, refuse=()):
         self.markup_pct = markup_pct
+        self.markup_by_barrier = markup_by_barrier or {}
+        self.refuse = set(refuse)
         self.proposal_args = []
         self.bought = []
         self.forgot = []
@@ -33,12 +35,15 @@ class FakeClient:
 
     async def get_proposal(self, contract_type, symbol, barrier, duration, unit, stake, currency):
         self.proposal_args.append((contract_type, barrier, duration, unit, stake))
+        if barrier in self.refuse:
+            raise DerivAPIError({"code": "Refused", "message": "no quote for this barrier"})
+        markup_pct = self.markup_by_barrier.get(barrier, self.markup_pct)
         spot, strike = 1000.0, 1000.0 + float(barrier)
         kind = "call" if contract_type.endswith("CALL") else "put"
         fair_points = bs_price(kind, spot, strike, years(duration, unit), 1.0)
-        k = stake / (fair_points * (1 + self.markup_pct / 100))
+        k = stake / (fair_points * (1 + markup_pct / 100))
         return {
-            "id": "p1",
+            "id": f"p{barrier}",
             "ask_price": stake,
             "display_number_of_contracts": str(k),
             "contract_details": {"barrier": f"{strike:.2f}"},
@@ -66,6 +71,7 @@ class FakeClient:
 
 class StubStrategy:
     name = "stub"
+    hold_candles = 1
 
     def __init__(self, signal):
         self.signal = signal
@@ -106,10 +112,9 @@ def test_full_trade_from_signal_to_settlement():
         ex, client, risk, journal = build()
         trade_id = await ex.handle_signal(SIGNAL, 1000.0)
         assert trade_id is not None
-        # the executor quotes the nearest `max_candidates` barriers and keeps the cheapest
-        assert len(client.proposal_args) == 3
-        assert client.proposal_args[0][:2] == ("VANILLALONGCALL", "+1.10")
-        assert client.bought == [("p1", 10.0)]
+        assert len(client.proposal_args) == 3                       # the three nearest strikes are quoted
+        assert client.proposal_args[0] == ("VANILLALONGCALL", "+1.10", 1, "m", 10.0)
+        assert client.bought == [("p+1.10", 10.0)]                  # equal prices: the nearest wins
         await asyncio.sleep(0.01)                      # let the watcher subscribe
         client.sub_cb({"proposal_open_contract": {"is_sold": 1, "profit": "7.5"}})
         await ex.wait_idle()
@@ -212,3 +217,64 @@ def test_absolute_barriers_are_converted_to_offsets():
     absolute = ["1200.00", "1220.00", "1240.00", "1260.00"]
     assert pick_barrier(absolute, 4.0, spot=1237.0) == "1240.00"
     assert pick_barrier(absolute, -15.0, spot=1237.0) == "1220.00"
+
+
+def test_cheapest_acceptable_strike_is_the_one_bought():
+    async def go():
+        client = FakeClient(markup_by_barrier={"+1.10": 12.0, "+0.00": 8.0, "+2.20": 6.0})
+        ex, client, _, _ = build(client=client)
+        await ex.handle_signal(SIGNAL, 1000.0)
+        assert client.bought == [("p+2.20", 10.0)]
+
+    asyncio.run(go())
+
+
+def test_one_refused_quote_does_not_cancel_the_others():
+    async def go():
+        ex, client, _, journal = build(client=FakeClient(refuse={"+1.10"}))
+        assert await ex.handle_signal(SIGNAL, 1000.0) is not None
+        assert client.bought == [("p+0.00", 10.0)]
+
+    asyncio.run(go())
+
+
+def test_settlement_waits_for_the_final_figure_after_expiry():
+    async def go():
+        ex, client, risk, journal = build()
+        await ex.handle_signal(SIGNAL, 1000.0)
+        await asyncio.sleep(0.01)
+        client.sub_cb({"proposal_open_contract": {"is_expired": 1, "profit": "0.1"}})   # expired, not final
+        await asyncio.sleep(0.02)
+        client.sub_cb({"proposal_open_contract": {"is_sold": 1, "status": "won", "profit": "4.2"}})
+        await ex.wait_idle()
+        assert journal.summary()["total_profit"] == 4.2
+
+    asyncio.run(go())
+
+
+def test_falls_back_to_the_expired_update_if_no_final_message_arrives():
+    async def go():
+        ex, client, risk, journal = build()
+        ex.expiry_grace = 0.05
+        await ex.handle_signal(SIGNAL, 1000.0)
+        await asyncio.sleep(0.01)
+        client.sub_cb({"proposal_open_contract": {"is_expired": 1, "profit": "-10.0"}})
+        await ex.wait_idle()
+        assert journal.summary()["total_profit"] == -10.0
+
+    asyncio.run(go())
+
+
+def test_open_contracts_are_picked_up_again_after_a_restart():
+    async def go():
+        ex, client, risk, journal = build()
+        trade_id = journal.open_trade(strategy="stub", contract_id=321, stake=10.0, markup_pct=5.0)
+        assert ex.resume_open_trades(journal.open_trades()) == 1
+        assert not risk.approve_trade(1000).allowed          # still counts as an open position
+        await asyncio.sleep(0.01)
+        client.sub_cb({"proposal_open_contract": {"is_sold": 1, "profit": "3.0"}})
+        await ex.wait_idle()
+        assert journal.open_trades() == [] and journal.summary()["total_profit"] == 3.0
+        assert risk.approve_trade(1000).allowed
+
+    asyncio.run(go())

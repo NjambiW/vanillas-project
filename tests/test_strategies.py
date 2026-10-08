@@ -103,3 +103,17 @@ def test_registry():
     assert get_strategy("breakout", hold_candles=9).hold_candles == 9
     with pytest.raises(ValueError, match="unknown strategy"):
         get_strategy("nope")
+
+
+@pytest.mark.parametrize("name", sorted(STRATEGIES))
+def test_live_window_gives_the_same_signal_as_the_full_history(name):
+    """The live bot only sees a rolling window of recent candles. Its signal for the newest candle
+    must equal what the backtest (which sees the whole history) said for that same candle."""
+    rng = np.random.default_rng(5)
+    candles = make_candles(100 + rng.normal(0, 1, 2500).cumsum())
+    strat = get_strategy(name)
+    full = strat.signal_series(candles).to_numpy()
+    window = 500
+    for end in range(window, len(candles) + 1, 7):
+        live = strat.signal_series(candles.iloc[end - window:end]).to_numpy()[-1]
+        assert live == full[end - 1], f"{name}: window and history disagree at candle {end - 1}"

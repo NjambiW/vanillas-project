@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-07T18:16:15Z",
+  "generated": "2026-10-08T06:10:38Z",
   "all_passed": false,
   "checks": [
     {
@@ -10,12 +10,12 @@
     {
       "gate": "Demo results consistent with backtest",
       "passed": false,
-      "detail": "53/100 demo trades logged."
+      "detail": "71/100 demo trades logged."
     },
     {
       "gate": "Kill switch tested on purpose",
-      "passed": true,
-      "detail": "Drill passed under today's settings (halted after 6 losses)."
+      "passed": false,
+      "detail": "Your risk settings changed since the drill ran. Re-run kill_switch_drill.py."
     },
     {
       "gate": "Real stake at the minimum",

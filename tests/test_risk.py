@@ -151,3 +151,59 @@ def test_release_position_frees_the_slot_without_recording_a_result():
     m.release_position()
     assert m.approve_trade(1000).allowed
     assert m.pnl_today == 0
+
+
+def _persisted(state, clock=None, cfg=None):
+    return RiskManager(cfg or RiskConfig(max_consecutive_losses=100, daily_loss_limit_pct=3.0),
+                       FixedFraction(0.01), now=clock or Clock(), state_path=state)
+
+
+def test_loss_tally_and_halt_survive_a_restart():
+    with tempfile.TemporaryDirectory() as tmp:
+        state = Path(tmp) / "risk_state.json"
+        clock = Clock()
+        m = _persisted(state, clock)
+        assert m.approve_trade(1000).allowed                  # day starts at 1000, limit is 30
+        for _ in range(2):
+            m.on_trade_opened(10)
+            m.on_trade_closed(-10)
+        restarted = _persisted(state, clock)                  # the bot is restarted
+        assert restarted.pnl_today == -20
+        restarted.on_trade_opened(10)
+        restarted.on_trade_closed(-10)                        # total -30 hits the limit
+        assert not restarted.approve_trade(970).allowed
+        again = _persisted(state, clock)                      # restarted while halted
+        d = again.approve_trade(970)
+        assert not d.allowed and "daily loss limit" in d.reason
+
+
+def test_persisted_halt_clears_on_the_next_utc_day():
+    with tempfile.TemporaryDirectory() as tmp:
+        state = Path(tmp) / "risk_state.json"
+        clock = Clock()
+        m = _persisted(state, clock)
+        m.halt("testing")
+        clock.advance(days=1)
+        assert _persisted(state, clock).approve_trade(1000).allowed
+
+
+def test_corrupt_state_file_is_ignored_rather_than_crashing():
+    with tempfile.TemporaryDirectory() as tmp:
+        state = Path(tmp) / "risk_state.json"
+        state.write_text("{ not json")
+        assert _persisted(state).approve_trade(1000).allowed
+
+
+def test_reopened_position_blocks_new_trades_until_released():
+    m = manager()
+    m.reopen_position()
+    assert not m.approve_trade(1000).allowed
+    m.on_trade_closed(1.0)
+    assert m.approve_trade(1000).allowed
+
+
+def test_settings_fingerprint_is_short_and_stable():
+    from risk import settings_fingerprint
+
+    a = settings_fingerprint()
+    assert len(a) == 12 and a == settings_fingerprint()

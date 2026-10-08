@@ -55,7 +55,6 @@ LOG_DIR = _HERE.parent / "logs"
 # --- Risk and staking -------------------------------------------------------------
 STAKING_PLAN = "fixed_fraction"   # fixed_fraction, fixed, oscars_grind or anti_martingale
 RISK_FRACTION = 0.01              # fixed_fraction: share of balance staked per trade (1%)
-FIXED_STAKE = 1.0                 # fixed: stake per trade (the go-live gate wants <= MIN_STAKE)
 MIN_STAKE = 1.0                   # smallest stake we will place
 MAX_STAKE = 25.0                  # hard cap on any single stake
 MAX_RISK_PCT_PER_TRADE = 2.0      # no stake may exceed this percent of balance
@@ -72,6 +71,9 @@ STATUS_EVERY_SECONDS = 300
 
 MAX_MARKUP_PCT = 15.0             # placeholder: set it from the table that measure_markup.py prints
 KILL_FILE = _HERE.parent / "STOP" # create a file with this name to stop the bot at once
+FIXED_STAKE = 1.0                 # stake used when STAKING_PLAN = "fixed" (the plan to use for real money)
+RISK_STATE_PATH = LOG_DIR / "risk_state.json"   # today's loss tally and halts survive a restart
+REPORTS_DIR = _HERE.parent / "reports"          # backtest, demo review, drill and gate reports
 
 
 if __name__ == "__main__":

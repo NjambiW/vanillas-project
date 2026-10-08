@@ -3,6 +3,7 @@
 Records every signal, every reason a signal was NOT traded, and every trade with its
 price, markup and result. This is how we later find out what is really working.
 """
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,44 +25,6 @@ CREATE TABLE IF NOT EXISTS trades (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _t_stat(xs: list) -> Optional[float]:
-    """One-sample t statistic of `xs` against zero, or None when it is undefined."""
-    n = len(xs)
-    if n < 2:
-        return None
-    mean = sum(xs) / n
-    var = sum((x - mean) ** 2 for x in xs) / (n - 1)
-    if var <= 0:
-        return None
-    return mean / (var ** 0.5) / (n ** 0.5)
-
-
-# Trades before we will call an edge an edge, and before a t statistic means much.
-MIN_TRADES_FOR_AN_EDGE = 100
-
-
-def verdict(perf: dict) -> str:
-    """Plain reading of a `performance()` dict -- no praise for a small sample."""
-    trades = perf.get("trades") or 0
-    roi = perf.get("roi")
-    t_stat = perf.get("gross_t_stat")
-    if trades == 0:
-        return "No settled trades yet: there is nothing to judge."
-    head = (f"{trades} settled trades, ROI {roi:+.1%} after markup, "
-            f"win rate {perf['win_rate']:.1%}. ")
-    if trades < MIN_TRADES_FOR_AN_EDGE:
-        return (head + f"Fewer than {MIN_TRADES_FOR_AN_EDGE} trades, so this is a "
-                "smoke test, not evidence -- in either direction.")
-    if t_stat is None:
-        return head + "Not enough variation to test whether the result is skill."
-    if roi > 0 and t_stat >= 2:
-        return head + f"gross t = {t_stat:.2f} (>= 2): the edge survives pricing."
-    if roi > 0:
-        return head + (f"gross t = {t_stat:.2f} (< 2): positive, but a run this small "
-                       "is consistent with luck.")
-    return head + f"gross t = {t_stat:.2f}: no edge shown even before the markup."
 
 
 class Journal:
@@ -134,49 +97,50 @@ class Journal:
         }
 
     def performance(self, strategy: Optional[str] = None) -> dict:
-        """Settled-trade performance, net of Deriv's markup.
+        """Settled-trade statistics, including whether results beat 'no edge'.
 
-        The markup is charged on top of fair value at entry, so `markup_cost` is what
-        that charge was worth in money: stake x markup%. Adding it back gives the
-        `gross_*` figures -- what the same entries would have returned had the quote
-        been free -- which is how we separate a real edge from a pricing question.
+        Under no edge, the payoff of a trade is worth stake / (1 + markup) on average.
+        So 'gross return' = payoff / that - 1 should average zero. A t-statistic far from
+        zero (beyond about +/-2) is evidence of an edge (or a curse); near zero means the
+        losses are just the markup.
         """
-        sql = ("SELECT stake, markup_pct, profit FROM trades "
-               "WHERE status IN ('won','lost') AND profit IS NOT NULL")
-        params: tuple = ()
+        query = "SELECT stake, profit, markup_pct FROM trades WHERE status IN ('won','lost')"
+        args: tuple = ()
         if strategy:
-            sql += " AND strategy=?"
-            params = (strategy,)
-        rows = self.db.execute(sql, params).fetchall()
-        if not rows:
-            return {"trades": 0, "win_rate": None, "total_profit": 0.0, "roi": None,
-                    "gross_roi": None, "gross_t_stat": None, "avg_markup_pct": None,
-                    "markup_cost": 0.0}
-
-        stakes = [float(s) for s, _, _ in rows]
-        markups = [(m if m is not None else 0.0) for _, m, _ in rows]
-        pnls = [float(p) for _, _, p in rows]
-        wins = [p for p in pnls if p > 0]
-
-        # markup_pct = ask/fair - 1, and the whole ask is the stake, so the part of the
-        # stake that was markup is ask - fair = ask * m/(100+m). Using ask*m here would
-        # exceed the stake itself on the deep-OTM rows, where m runs past 150%.
-        costs = [s * m / (100.0 + m) for s, m in zip(stakes, markups)]
-        total_stake = sum(stakes)
-        markup_cost = sum(costs)
-        total_profit = sum(pnls)
-        gross_rois = [(p + c) / (s - c)
-                      for p, s, c in zip(pnls, stakes, costs) if s - c > 0]
+            query += " AND strategy = ?"
+            args = (strategy,)
+        rows = self.db.execute(query, args).fetchall()
+        n = len(rows)
+        if n == 0:
+            return {"trades": 0}
+        stakes = [r[0] for r in rows]
+        profits = [r[1] for r in rows]
+        markups = [r[2] or 0.0 for r in rows]
+        gross = [(p + s_) * (1 + m / 100) / s_ - 1 for s_, p, m in zip(stakes, profits, markups)]
+        mean_g = sum(gross) / n
+        if n > 1:
+            var = sum((g - mean_g) ** 2 for g in gross) / (n - 1)
+            t_stat = mean_g / math.sqrt(var / n) if var > 0 else 0.0
+        else:
+            t_stat = 0.0
+        # money paid to the markup: stake - fair value of what was bought
+        markup_cost = sum(s_ - s_ / (1 + m / 100) for s_, m in zip(stakes, markups))
         return {
-            "trades": len(rows),
-            "win_rate": len(wins) / len(rows),
-            "total_profit": total_profit,
-            "roi": total_profit / total_stake if total_stake else None,
-            "gross_roi": (sum(gross_rois) / len(gross_rois)) if gross_rois else None,
-            "gross_t_stat": _t_stat(gross_rois),
-            "avg_markup_pct": sum(markups) / len(markups),
+            "trades": n,
+            "win_rate": sum(1 for p in profits if p > 0) / n,
+            "total_profit": sum(profits),
+            "roi": sum(p / s_ for p, s_ in zip(profits, stakes)) / n,
+            "gross_roi": mean_g,
+            "gross_t_stat": t_stat,
+            "avg_markup_pct": sum(markups) / n,
             "markup_cost": markup_cost,
         }
+
+    def open_trades(self) -> list:
+        """Trades that were bought but never recorded as settled: [(id, contract_id, strategy)]."""
+        return self.db.execute(
+            "SELECT id, contract_id, strategy FROM trades WHERE status = 'open' ORDER BY id"
+        ).fetchall()
 
     def skip_reasons(self) -> list:
         return self.db.execute(
@@ -189,3 +153,20 @@ class Journal:
             "FROM trades ORDER BY id DESC LIMIT ?",
             (n,),
         ).fetchall()
+
+
+def verdict(perf: dict) -> str:
+    """Plain-English reading of Journal.performance()."""
+    n = perf.get("trades", 0)
+    if n == 0:
+        return "No settled trades yet."
+    if n < 30:
+        return f"Only {n} settled trades. That is too few to conclude anything either way."
+    t = perf["gross_t_stat"]
+    if abs(t) < 2:
+        return ("No evidence of an edge. Before the markup your results look like chance "
+                f"(t = {t:.1f}), so the losses are about what the markup alone explains.")
+    if t >= 2:
+        return (f"Results before the markup are better than chance (t = {t:.1f}). That is worth "
+                "investigating, but it needs many more trades and a test on fresh data before you trust it.")
+    return f"Results are worse than the markup alone explains (t = {t:.1f}). Check for a bug or bad entries."

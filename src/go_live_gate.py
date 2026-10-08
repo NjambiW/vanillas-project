@@ -9,7 +9,8 @@ then:
     python src/go_live_gate.py
 
 Checks:
-  1. A real edge after markup, out of sample: reports/backtest_report.json must show, on data the
+  1. A real edge after markup, out of sample: reports/backtest_report.json must show (and, if the
+     report carries a "verdict", it must be "confirmed"; if it carries "ci_low", that must be above 0), on data the
      strategy never saw, 100+ trades, positive return per stake, and a p-value below 0.05 divided
      by the number of variants you have tried (so trying many things does not make luck look
      like skill); the training half must also be positive; and the cost model must come from a
@@ -69,6 +70,13 @@ def gate_oos(bt_path, root=ROOT):
             return False, f"Backtest report is {age.days} days old; re-run it on fresh data."
     except (KeyError, ValueError):
         return False, "Backtest report has no valid timestamp."
+
+    verdict = str(d.get("verdict", "")).strip().lower().rstrip("*")
+    if verdict and verdict != "confirmed":
+        return False, f"The backtest's own verdict is '{verdict}'. Only 'confirmed' can open this gate."
+    ci_low = oos.get("ci_low")
+    if ci_low is not None and ci_low <= 0:
+        return False, f"The out-of-sample bootstrap interval starts at {ci_low:+.1%}, so zero is still possible."
 
     n, roi, p_value = oos.get("trades"), oos.get("roi"), oos.get("p_value")
     if n is None or roi is None or p_value is None:

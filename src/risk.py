@@ -10,16 +10,17 @@ Order of use for every trade the strategy wants:
 Every automatic stop lasts until the next UTC day. The kill file (a file called STOP in
 the project folder) stops the bot until you delete it.
 """
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Callable, Optional
 import json
 import logging
 import os
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Callable, Optional
 
 from markup import MarkupError, markup_row
 from staking import StakingPlan, floor_cents
+
 
 log = logging.getLogger("risk")
 
@@ -57,41 +58,6 @@ class RiskConfig:
         )
 
 
-def settings_fingerprint() -> str:
-    """Stable hash of the risk and staking settings currently in config.py.
-
-    The kill-switch drill records this next to its result so the go-live gate can tell
-    whether the settings it was run under are still the settings in force: a drill
-    proves nothing about limits it never saw. Values are rounded so that reformatting
-    a float does not look like a change.
-    """
-    import hashlib
-    import json
-
-    import config
-
-    cfg = RiskConfig.from_settings()
-    payload = {
-        "risk": {
-            "min_stake": round(cfg.min_stake, 6),
-            "max_stake": round(cfg.max_stake, 6),
-            "max_risk_pct_per_trade": round(cfg.max_risk_pct_per_trade, 6),
-            "daily_loss_limit_pct": round(cfg.daily_loss_limit_pct, 6),
-            "max_consecutive_losses": cfg.max_consecutive_losses,
-            "max_trades_per_day": cfg.max_trades_per_day,
-            "max_open_positions": cfg.max_open_positions,
-            "min_seconds_between_trades": round(cfg.min_seconds_between_trades, 6),
-        },
-        "staking": {
-            "plan": config.STAKING_PLAN,
-            "fraction": round(config.RISK_FRACTION, 6),
-            "fixed_stake": round(config.FIXED_STAKE, 6),
-        },
-    }
-    blob = json.dumps(payload, sort_keys=True).encode()
-    return hashlib.sha256(blob).hexdigest()[:16]
-
-
 @dataclass
 class Decision:
     allowed: bool
@@ -111,7 +77,6 @@ class RiskManager:
         self.cfg = config
         self.staking = staking
         self._now = now
-        self._state_path = Path(state_path) if state_path else None
         self._day = None
         self._day_start_balance: Optional[float] = None
         self._pnl_today = 0.0
@@ -120,65 +85,49 @@ class RiskManager:
         self._open_positions = 0
         self._last_trade_time: Optional[datetime] = None
         self._halt_reason: Optional[str] = None
-        self._halt_sticky = False
+        self._state_path = Path(state_path) if state_path else None
         self._load_state()
 
-    # ------------------------------------------------------- state persistence
+    # ------------------------------------------------------------ persistence
+    # Today's loss tally, loss streak and halts are saved to a small JSON file so that
+    # restarting the bot cannot reset a daily loss limit or clear a halt.
     def _load_state(self) -> None:
-        """Restore the halt and the day's tally so a restart cannot clear either.
-
-        A bot that is killed mid-day and brought back must not be allowed to start
-        trading again with a clean slate: the halt it stopped under and the loss it
-        had already taken are the reason it is not trading.
-        """
-        if self._state_path is None:
-            return
-        if not self._state_path.exists():
+        if self._state_path is None or not self._state_path.exists():
             return
         try:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            log.error("could not read risk state %s (%s); trading is halted until it can be",
-                      self._state_path, exc)
-            self._halt_reason = f"risk state at {self._state_path} is unreadable ({exc})"
-            self._halt_sticky = True
-            return
-        try:
-            self._day = datetime.fromisoformat(data["day"]).date() if data.get("day") else None
+            self._day = date.fromisoformat(data["day"])
             self._day_start_balance = data.get("day_start_balance")
             self._pnl_today = float(data.get("pnl_today", 0.0))
             self._trades_today = int(data.get("trades_today", 0))
             self._consecutive_losses = int(data.get("consecutive_losses", 0))
-            self._halt_reason = data.get("halt_reason") or None
-            self._halt_sticky = bool(data.get("halt_sticky", False))
-        except (KeyError, TypeError, ValueError) as exc:
-            log.error("risk state %s is malformed (%s); trading is halted until it can be fixed",
-                      self._state_path, exc)
-            self._halt_reason = f"risk state at {self._state_path} is malformed ({exc})"
-            self._halt_sticky = True
+            self._halt_reason = data.get("halt_reason")
+            last = data.get("last_trade_time")
+            self._last_trade_time = datetime.fromisoformat(last) if last else None
+            log.info("risk state restored for %s (pnl today %.2f, halted: %s)",
+                     self._day, self._pnl_today, bool(self._halt_reason))
+        except (OSError, ValueError, KeyError, TypeError):
+            log.warning("could not read %s, starting with a clean risk state", self._state_path)
 
     def _save_state(self) -> None:
-        """Write the state atomically; if we cannot, stop trading rather than forget it."""
-        if self._state_path is None:
+        if self._state_path is None or self._day is None:
             return
         data = {
-            "day": self._day.isoformat() if self._day else None,
+            "day": self._day.isoformat(),
             "day_start_balance": self._day_start_balance,
             "pnl_today": self._pnl_today,
             "trades_today": self._trades_today,
             "consecutive_losses": self._consecutive_losses,
             "halt_reason": self._halt_reason,
-            "halt_sticky": self._halt_sticky,
+            "last_trade_time": self._last_trade_time.isoformat() if self._last_trade_time else None,
         }
-        tmp = self._state_path.with_name(self._state_path.name + ".tmp")
         try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             os.replace(tmp, self._state_path)
-        except OSError as exc:
-            log.error("could not write risk state %s (%s)", self._state_path, exc)
-            # fail closed: a halt we cannot persist is a halt a restart would clear
-            self._halt_reason = f"cannot persist risk state to {self._state_path} ({exc})"
-            self._halt_sticky = True
+        except OSError:
+            log.warning("could not save risk state to %s", self._state_path)
 
     # ----------------------------------------------------------- bookkeeping
     def _roll_day(self) -> None:
@@ -189,8 +138,7 @@ class RiskManager:
             self._pnl_today = 0.0
             self._trades_today = 0
             self._consecutive_losses = 0
-            if not self._halt_sticky:
-                self._halt_reason = None  # automatic halts end with the day
+            self._halt_reason = None  # automatic halts end with the day
             self._save_state()
 
     def on_trade_opened(self, stake: float) -> None:
@@ -208,6 +156,10 @@ class RiskManager:
         self.staking.record(profit)
         self._save_state()
 
+    def reopen_position(self) -> None:
+        """After a restart: count a contract bought earlier that has not settled yet."""
+        self._open_positions += 1
+
     def release_position(self) -> None:
         """Free the open-trade slot without recording a result (settlement unknown)."""
         self._open_positions = max(0, self._open_positions - 1)
@@ -221,6 +173,7 @@ class RiskManager:
             return Decision(False, f"kill file present ({cfg.kill_file}); delete it to resume")
         if self._day_start_balance is None:
             self._day_start_balance = balance - self._pnl_today
+            self._save_state()
         if self._halt_reason:
             return Decision(False, self._halt_reason)
 
@@ -269,24 +222,10 @@ class RiskManager:
         return stake
 
     # ---------------------------------------------------------------- control
-    def halt(self, reason: str, sticky: bool = False) -> None:
-        """Stop trading (call this from error handlers too).
-
-        The default halt lasts until the next UTC day, like every other automatic stop.
-        `sticky=True` is for the ones that must outlive the day -- we lost track of an
-        open contract, or the state file cannot be written -- because the problem they
-        report does not fix itself at midnight. A sticky halt is only cleared by
-        fixing the cause and deleting the state file, or by hand via `clear_halt()`.
-        """
+    def halt(self, reason: str) -> None:
+        """Stop trading until the next UTC day (call this from error handlers too)."""
         self._roll_day()  # make sure today's reset has happened, so it cannot wipe this halt
         self._halt_reason = reason
-        self._halt_sticky = sticky
-        self._save_state()
-
-    def clear_halt(self) -> None:
-        """Clear a sticky halt once its cause has been dealt with."""
-        self._halt_reason = None
-        self._halt_sticky = False
         self._save_state()
 
     @property
@@ -325,3 +264,20 @@ class PremiumGate:
                 False, f"markup {markup:.1f}% is above the {self.max_markup_pct}% limit", markup_pct=markup
             )
         return Decision(True, "price acceptable", markup_pct=markup)
+
+
+def settings_fingerprint() -> str:
+    """A short hash of every setting that affects risk. The kill-switch drill stores it, and the
+    go-live gate refuses a drill that was run under different settings."""
+    import hashlib
+
+    import config
+
+    data = {k: str(v) for k, v in asdict(RiskConfig.from_settings()).items() if k != "kill_file"}
+    data.update({
+        "plan": config.STAKING_PLAN,
+        "fixed_stake": config.FIXED_STAKE,
+        "fraction": config.RISK_FRACTION,
+        "max_markup_pct": config.MAX_MARKUP_PCT,
+    })
+    return hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]

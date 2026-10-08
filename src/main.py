@@ -3,23 +3,24 @@
 Starts in DRY_RUN mode (see config.py): it watches the market, finds signals, prices them
 and logs what it WOULD do, without buying. Set DRY_RUN = False to trade on your demo account.
 
-For a long demo forward test use:  python src/run_demo_forward.py
-(it calls main() below with DRY_RUN switched off and a stop event, and prints performance).
+Restart safety: today's loss tally and any halt are saved to logs/risk_state.json, and
+contracts that were bought but not yet settled are re-attached when the bot starts.
 """
 import asyncio
 import logging
-from typing import Optional
 
 from config import (
     CANDLE_SECONDS,
+    CLIENTid,
     DRY_RUN,
     FIXED_STAKE,
     HISTORY_COUNT,
     JOURNAL_PATH,
     LOG_DIR,
     MAX_MARKUP_PCT,
-    STAKING_PLAN,
     RISK_FRACTION,
+    RISK_STATE_PATH,
+    STAKING_PLAN,
     STATUS_EVERY_SECONDS,
     STRATEGY_NAME,
     SYMBOL,
@@ -44,6 +45,14 @@ def setup_logging() -> None:
     )
 
 
+def plan_params() -> dict:
+    if STAKING_PLAN == "fixed_fraction":
+        return {"fraction": RISK_FRACTION}
+    if STAKING_PLAN == "fixed":
+        return {"amount": FIXED_STAKE}
+    return {}
+
+
 async def status_loop(client: DerivClient, risk: RiskManager, journal: Journal) -> None:
     while True:
         await asyncio.sleep(STATUS_EVERY_SECONDS)
@@ -59,49 +68,45 @@ async def status_loop(client: DerivClient, risk: RiskManager, journal: Journal) 
             log.exception("status check failed")
 
 
-async def main(stop_event: Optional[asyncio.Event] = None) -> None:
-    """Run the bot until Ctrl+C, or until `stop_event` is set (if one is given)."""
+async def main() -> None:
     setup_logging()
     strategy = get_strategy(STRATEGY_NAME)
-    plan_params = ({"fraction": RISK_FRACTION} if STAKING_PLAN == "fixed_fraction"
-                   else {"amount": FIXED_STAKE} if STAKING_PLAN == "fixed" else {})
-    risk = RiskManager(RiskConfig.from_settings(), make_plan(STAKING_PLAN, **plan_params),
-                       state_path=LOG_DIR / "risk_state.json")
+    plan = make_plan(STAKING_PLAN, **plan_params())
+    risk = RiskManager(RiskConfig.from_settings(), plan, state_path=RISK_STATE_PATH)
     gate = PremiumGate(MAX_MARKUP_PCT)
     journal = Journal(JOURNAL_PATH)
 
     client = DerivClient()
     await client.start()
+    bal = await client.get_balance()
+    log.info("Account %s | balance %s %s | %s | staking %s %s | markup limit %s%%",
+             CLIENTid, bal["balance"], bal["currency"],
+             "DRY RUN (no buying)" if DRY_RUN else "LIVE ORDERS ON THIS ACCOUNT",
+             STAKING_PLAN, plan_params(), MAX_MARKUP_PCT)
+
     executor = Executor(
-        client, strategy, risk, gate, journal, SYMBOL, CANDLE_SECONDS, dry_run=DRY_RUN,
-        proposal_log=LOG_DIR / "proposals.csv",
+        client, strategy, risk, gate, journal, SYMBOL, CANDLE_SECONDS, dry_run=DRY_RUN
     )
+    resumed = executor.resume_open_trades(journal.open_trades())
+    if resumed:
+        log.warning("%d unsettled contract(s) from the previous run are being watched", resumed)
 
     loop = asyncio.get_running_loop()
     pending: set = set()
 
-    def _finished(task: asyncio.Task) -> None:
-        pending.discard(task)
-        if not task.cancelled() and task.exception() is not None:
-            # create_task drops the result, so without this the traceback is never shown
-            log.error("candle handler failed", exc_info=task.exception())
-
     def on_candle(frame) -> None:
         task = loop.create_task(executor.handle_candle(frame))
         pending.add(task)
-        task.add_done_callback(_finished)
+        task.add_done_callback(pending.discard)
 
     feed = CandleFeed(client, SYMBOL, CANDLE_SECONDS, HISTORY_COUNT, on_candle=on_candle)
     await feed.start()
-    log.info(
-        "Bot running: %s on %s, %ss candles, %s mode. Ctrl+C to stop.",
-        strategy.name, SYMBOL, CANDLE_SECONDS, "DRY RUN" if DRY_RUN else "DEMO TRADING",
-    )
+    log.info("Bot running: %s on %s, %ss candles. Ctrl+C to stop.",
+             strategy.name, SYMBOL, CANDLE_SECONDS)
     status = asyncio.create_task(status_loop(client, risk, journal))
-    status.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     try:
-        await (stop_event or asyncio.Event()).wait()  # run until interrupted or told to stop
+        await asyncio.Event().wait()  # run until interrupted
     finally:
         status.cancel()
         await feed.stop()
@@ -109,8 +114,7 @@ async def main(stop_event: Optional[asyncio.Event] = None) -> None:
             log.info("waiting for open contracts to settle (Ctrl+C again to force quit)")
             await executor.wait_idle()
         await client.close()
-        s = journal.summary()
-        log.info("FINAL SUMMARY %s", s)
+        log.info("FINAL SUMMARY %s", journal.summary())
         journal.close()
 
 
