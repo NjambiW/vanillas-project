@@ -2,12 +2,14 @@
 from strategies.base import Signal, Strategy
 from strategies.breakout import Breakout
 from strategies.mean_reversion import MeanReversion
+from strategies.regime_aware import RegimeAware, Regime, RegimeConfig
 from strategies.trend_pullback import TrendPullback
 
 STRATEGIES = {
     TrendPullback.name: TrendPullback,
     Breakout.name: Breakout,
     MeanReversion.name: MeanReversion,
+    RegimeAware.name: RegimeAware,
 }
 
 
@@ -19,4 +21,4 @@ def get_strategy(name: str, **params) -> Strategy:
 
 
 __all__ = ["Signal", "Strategy", "STRATEGIES", "get_strategy",
-           "TrendPullback", "Breakout", "MeanReversion"]
+           "TrendPullback", "Breakout", "MeanReversion", "RegimeAware", "Regime", "RegimeConfig"]

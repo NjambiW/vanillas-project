@@ -6,6 +6,11 @@ Flow for each signal:
     -> watch the contract until it settles -> record the result
 Every refusal is written to the journal with its reason.
 
+Every proposal Deriv returns is also appended to the proposal log (if one is
+configured), bought or not. See proposal_log.py: replaying observed quotes is the only
+way to test real tradability, and logging only the contracts we bought would leave the
+opportunity set unreconstructable.
+
 Changes in this version:
   * Instead of quoting only the single closest barrier, the executor quotes the
     `max_candidates` closest barriers and buys the one with the lowest markup that
@@ -17,13 +22,16 @@ Changes in this version:
 """
 import asyncio
 import logging
-from typing import Optional
+import time
+from pathlib import Path
+from typing import Optional, Union
 
 import pandas as pd
 
 from deriv_client import DerivAPIError, DerivClient
 from journal import Journal
-from markup import ASK_PRICE_KEYS, PAYOUT_PER_POINT_KEYS, find_field
+from markup import ASK_PRICE_KEYS, PAYOUT_PER_POINT_KEYS, SPOT_KEYS, find_field
+from proposal_log import append_proposal
 from risk import PremiumGate, RiskManager
 from strategies.base import Signal, Strategy
 
@@ -91,6 +99,7 @@ class Executor:
         settle_buffer: float = 120.0,
         max_candidates: int = 3,
         expiry_grace: float = 15.0,
+        proposal_log: "Optional[Union[str, Path]]" = None,
     ):
         self.client, self.strategy, self.risk = client, strategy, risk
         self.gate, self.journal = gate, journal
@@ -99,6 +108,7 @@ class Executor:
         self.settle_buffer = settle_buffer
         self.max_candidates = max_candidates
         self.expiry_grace = expiry_grace
+        self.proposal_log = Path(proposal_log) if proposal_log else None
         self._lock = asyncio.Lock()
         self._tasks: set = set()
         self._errors = 0
@@ -156,6 +166,7 @@ class Executor:
             proposal = await self.client.get_proposal(
                 signal.contract_type, self.symbol, barrier, duration, unit, stake, currency
             )
+            self._log_proposal(signal, proposal, barrier, duration, unit, price)
             min_stake, max_stake = proposal.get("min_stake"), proposal.get("max_stake")
             if min_stake is not None and stake < float(min_stake):
                 rejections.append(f"{barrier}: stake {stake} is below Deriv's minimum {min_stake}")
@@ -195,28 +206,88 @@ class Executor:
             return None
 
         contract_id = bought.get("contract_id")
+        if contract_id is None:
+            skip(f"buy returned no contract id ({bought}); check the account before resuming")
+            self.risk.halt(f"bought a contract we cannot identify ({bought})",
+                           sticky=True)
+            return None
+
+        # Open the journal row before the risk slot: if the write fails we must not be
+        # left holding a position nobody is following.
+        try:
+            trade_id = self.journal.open_trade(
+                strategy=name,
+                contract_id=contract_id,
+                contract_type=signal.contract_type,
+                symbol=self.symbol,
+                duration=f"{duration}{unit}",
+                barrier=barrier,
+                strike=_to_float((proposal.get("contract_details") or {}).get("barrier")),
+                spot=_to_float(proposal.get("spot")),
+                stake=stake,
+                payout_per_point=_to_float(find_field(proposal, PAYOUT_PER_POINT_KEYS)),
+                markup_pct=verdict.markup_pct,
+            )
+        except Exception:  # noqa: BLE001  a full disk or a locked DB must not orphan a live position
+            log.exception("could not journal contract %s", contract_id)
+            trade_id = None
+            self.risk.halt(f"bought contract {contract_id} but could not record it; check the account",
+                           sticky=True)
+
         self.risk.on_trade_opened(stake)
-        trade_id = self.journal.open_trade(
-            strategy=name,
-            contract_id=contract_id,
-            contract_type=signal.contract_type,
-            symbol=self.symbol,
-            duration=f"{duration}{unit}",
-            barrier=barrier,
-            strike=_to_float((proposal.get("contract_details") or {}).get("barrier")),
-            spot=_to_float(proposal.get("spot")),
-            stake=stake,
-            payout_per_point=_to_float(find_field(proposal, PAYOUT_PER_POINT_KEYS)),
-            markup_pct=verdict.markup_pct,
-        )
         log.info("BOUGHT %s %s%s barrier %s stake %s (contract %s)",
                  signal.contract_type, duration, unit, barrier, stake, contract_id)
 
         expiry_seconds = signal.hold_candles * self.granularity
-        task = asyncio.create_task(self._watch(contract_id, trade_id, expiry_seconds))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._spawn(self._watch(contract_id, trade_id, expiry_seconds))
         return trade_id
+
+    # ------------------------------------------------------------ background tasks
+    def _spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+
+    def _task_done(self, task) -> None:
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        # Without this the exception is never retrieved, and -- worse -- a watcher that
+        # dies has left its contract open in RiskManager with nobody to release it.
+        log.error("background task failed", exc_info=exc)
+        self.risk.release_position()
+        self.risk.halt(f"a contract watcher died ({exc}); check the account's open positions",
+                       sticky=True)
+
+    # ---------------------------------------------------------- proposal logging
+    def _log_proposal(self, signal, proposal: dict, barrier: str, duration: int,
+                      unit: str, spot: float) -> None:
+        """Append one observed quote, whether or not we end up buying it.
+
+        Rejected quotes are logged too: logging only purchased contracts creates
+        selection bias and prevents the opportunity set from being reconstructed.
+        """
+        if self.proposal_log is None:
+            return
+        try:
+            append_proposal(self.proposal_log, {
+                "epoch": _to_int(find_field(proposal, ("epoch", "date_start"))) or int(time.time()),
+                "symbol": self.symbol,
+                "contracttype": signal.contract_type,
+                "duration": duration,
+                "durationunit": unit,
+                "barrier": barrier,
+                "spot": _to_float(find_field(proposal, SPOT_KEYS)) or spot,
+                "askprice": _to_float(find_field(proposal, ASK_PRICE_KEYS)),
+                "payout": _to_float(find_field(proposal, ("payout", "payout_amount"))),
+                "payoutperpoint": _to_float(find_field(proposal, PAYOUT_PER_POINT_KEYS)),
+                "proposalid": proposal.get("id"),
+            })
+        except Exception:  # noqa: BLE001  a log write must never block a trade
+            log.warning("could not append to %s", self.proposal_log, exc_info=True)
 
     # ------------------------------------------------------- follow to settlement
     async def _watch(self, contract_id, trade_id: int, expiry_seconds: float) -> None:
@@ -256,16 +327,49 @@ class Executor:
                     log.warning("could not release subscription %s", sub_id)
 
         if poc is None:
-            self.journal.close_trade(trade_id, None, "unknown")
-            self.risk.release_position()
-            self.risk.halt(f"could not confirm settlement of contract {contract_id}; check the account")
-            log.error("settlement of contract %s unknown, bot halted", contract_id)
+            self._abandon(contract_id, trade_id,
+                          f"could not confirm settlement of contract {contract_id}; check the account")
             return
 
-        profit = float(poc.get("profit", 0))
-        self.journal.close_trade(trade_id, profit, "won" if profit > 0 else "lost")
-        self.risk.on_trade_closed(profit)
+        profit = _to_float(poc.get("profit"))
+        if profit is None:
+            # A missing profit figure must not be booked as a 0.00 loss: it would reset
+            # the consecutive-loss counter and misreport the day's tally.
+            self._abandon(contract_id, trade_id,
+                          f"contract {contract_id} settled without a profit figure "
+                          f"({poc.get('status')!r}); check the account")
+            return
+
+        status = "won" if profit > 0 else "lost"
+        try:
+            if trade_id is None:
+                log.warning("contract %s settled %s %+.2f but has no journal row",
+                            contract_id, status, profit)
+            else:
+                self.journal.close_trade(trade_id, profit, status)
+        except Exception:  # noqa: BLE001  never skip the risk update because a write failed
+            log.exception("could not journal the settlement of contract %s", contract_id)
+            self.risk.halt(f"contract {contract_id} settled but could not be recorded; "
+                           "check the account", sticky=True)
+        finally:
+            self.risk.on_trade_closed(profit)
         log.info("SETTLED contract %s profit %.2f", contract_id, profit)
+
+    def _abandon(self, contract_id, trade_id, reason: str) -> None:
+        """Settlement is unknown: free the slot, record it as such, and stop trading.
+
+        The halt is sticky -- midnight does not tell us what happened to the money.
+        """
+        try:
+            if trade_id is None:
+                log.warning("contract %s abandoned (%s) but has no journal row", contract_id, reason)
+            else:
+                self.journal.close_trade(trade_id, None, "unknown")
+        except Exception:  # noqa: BLE001
+            log.exception("could not journal the unknown settlement of contract %s", contract_id)
+        self.risk.release_position()
+        self.risk.halt(reason, sticky=True)
+        log.error("settlement of contract %s unknown, bot halted", contract_id)
 
     async def _await_settlement(self, final, expired, latest) -> Optional[dict]:
         """Wait for the final message; after expiry, give it `expiry_grace` seconds to arrive."""
@@ -291,5 +395,12 @@ class Executor:
 def _to_float(value) -> Optional[float]:
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value) -> Optional[int]:
+    try:
+        return int(float(value))
     except (TypeError, ValueError):
         return None

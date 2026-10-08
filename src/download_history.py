@@ -3,13 +3,21 @@
 Examples:
     python src/download_history.py
     python src/download_history.py --symbol 1HZ100V --granularity 60 --total 50000
+
+The window always ends at the latest candle, so every download moves forward in time.
+New candles are therefore MERGED with whatever is already on disk rather than
+replacing it: an overwrite would quietly drop the oldest days, which are the ones the
+out-of-sample test needs.
 """
 import argparse
 import asyncio
 import logging
 
+import pandas as pd
+
 from config import CANDLE_SECONDS, DATA_DIR, SYMBOL
-from data_feed import STANDARD_GRANULARITIES, candles_to_frame, save_candles_csv
+from data_feed import (CANDLE_COLUMNS, STANDARD_GRANULARITIES, candles_to_frame,
+                       load_candles_csv, save_candles_csv)
 from deriv_client import DerivClient
 
 PAGE_SIZE = 5000
@@ -54,6 +62,18 @@ def main() -> None:
 
     df = asyncio.run(download(args.symbol, args.granularity, args.total))
     path = DATA_DIR / f"{args.symbol}_{args.granularity}s.csv"
+    if df.empty:
+        # A failed download must not truncate the history we already have.
+        raise SystemExit(f"No candles returned; {path} left untouched.")
+    if path.exists():
+        on_disk = load_candles_csv(path)
+        if len(on_disk):
+            merged = candles_to_frame(pd.concat(
+                [on_disk[CANDLE_COLUMNS], df[CANDLE_COLUMNS]], ignore_index=True
+            ).to_dict("records"))
+            print(f"Kept {len(on_disk)} candles already on disk "
+                  f"(new: {len(df)}, after de-duplication: {len(merged)}).")
+            df = merged
     save_candles_csv(df, path)
     print(f"Saved {len(df)} candles to {path}")
     if len(df):

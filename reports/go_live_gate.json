@@ -1,26 +1,26 @@
 {
-  "generated": "2026-10-07T11:15:44Z",
+  "generated": "2026-10-07T18:16:15Z",
   "all_passed": false,
   "checks": [
     {
       "gate": "Real edge after markup, out of sample",
       "passed": false,
-      "detail": "Missing reports/backtest_report.json. Create it: python src/run_backtest.py --strategy NAME --hold N --export"
+      "detail": "Out-of-sample return +2.3% is positive but p = 0.241 is not below 0.0056 (0.05 / 9 variants tried). Could easily be luck."
     },
     {
       "gate": "Demo results consistent with backtest",
       "passed": false,
-      "detail": "35/100 demo trades logged."
+      "detail": "53/100 demo trades logged."
     },
     {
       "gate": "Kill switch tested on purpose",
-      "passed": false,
-      "detail": "Could not read config.py (cannot import name 'settings_fingerprint' from 'risk' (C:\\Users\\benne\\PycharmProjects\\vanillas project\\src\\risk.py))."
+      "passed": true,
+      "detail": "Drill passed under today's settings (halted after 6 losses)."
     },
     {
       "gate": "Real stake at the minimum",
       "passed": false,
-      "detail": "Could not read config.py (module 'config' has no attribute 'FIXED_STAKE')."
+      "detail": "STAKING_PLAN is 'fixed_fraction'. Use 'fixed' for the first real money."
     }
   ]
 }

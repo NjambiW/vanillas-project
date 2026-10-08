@@ -55,6 +55,7 @@ LOG_DIR = _HERE.parent / "logs"
 # --- Risk and staking -------------------------------------------------------------
 STAKING_PLAN = "fixed_fraction"   # fixed_fraction, fixed, oscars_grind or anti_martingale
 RISK_FRACTION = 0.01              # fixed_fraction: share of balance staked per trade (1%)
+FIXED_STAKE = 1.0                 # fixed: stake per trade (the go-live gate wants <= MIN_STAKE)
 MIN_STAKE = 1.0                   # smallest stake we will place
 MAX_STAKE = 25.0                  # hard cap on any single stake
 MAX_RISK_PCT_PER_TRADE = 2.0      # no stake may exceed this percent of balance

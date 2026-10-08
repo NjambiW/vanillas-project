@@ -21,6 +21,11 @@ from pricing import index_vol, years
 
 LEVELS = (-1.29, -0.68, 0.0, 0.68, 1.29)   # deep ITM ... ATM ... deep OTM
 
+# How far (in model-vol units) a measured strike may sit from its barrier and still
+# count as that barrier. Wider than the rounding the measurement itself produces,
+# narrower than the gap to the next barrier (0.61).
+LEVEL_TOLERANCE = 0.15
+
 # Markup % over fair price, measured on Deriv 1HZ100V on 2026-10-06 (average of the
 # CALL and PUT rows). Columns follow LEVELS. Seconds -> five markups.
 MEASURED = {
@@ -54,10 +59,14 @@ def _parse_duration(text: str) -> int:
     return int(match.group(1)) * _UNIT_SECONDS[match.group(2)]
 
 
-def load_markup_csv(path, symbol: str = "1HZ100V") -> dict:
+def load_markup_csv(path, symbol: str = "1HZ100V", tolerance: float = LEVEL_TOLERANCE) -> dict:
     """Build a markup table from a CSV written by measure_markup.py.
 
-    Only durations with all five strike levels measured are used.
+    A row is only credited to a strike level when it is actually close to it. The
+    measurement sweeps absolute strikes, so on longer durations it reaches well past
+    the deepest barrier -- averaging a level-1.69 contract into the level-1.29 column
+    would price the barrier at a contract we never trade. Durations left with a
+    missing level are dropped and fall back to interpolation across the others.
     """
     sigma = index_vol(symbol)
     cells: dict = {}
@@ -75,6 +84,8 @@ def load_markup_csv(path, symbol: str = "1HZ100V") -> dict:
             offset = strike - spot
             level = offset / unit if row["type"].endswith("CALL") else -offset / unit
             idx = min(range(len(LEVELS)), key=lambda i: abs(LEVELS[i] - level))
+            if abs(LEVELS[idx] - level) > tolerance:
+                continue
             cells.setdefault(seconds, {}).setdefault(idx, []).append(markup)
     table = {}
     for seconds, by_idx in cells.items():

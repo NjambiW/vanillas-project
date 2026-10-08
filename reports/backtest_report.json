@@ -1,0 +1,19 @@
+{
+  "generated": "2026-10-07T18:16:06Z",
+  "symbol": "1HZ100V",
+  "strategy": "mean_reversion",
+  "hold_candles": 60,
+  "mode": "non-overlap",
+  "cost_model_source": "C:\\Users\\benne\\PycharmProjects\\vanillas project\\logs\\markup_20261006_113251.csv (+ built-in table for missing expiries)",
+  "variants_tested": 9,
+  "train": {
+    "trades": 305,
+    "roi": 0.09013607075718891,
+    "p_value": 0.07796101949025487
+  },
+  "out_of_sample": {
+    "trades": 123,
+    "roi": 0.023408235498212897,
+    "p_value": 0.2413793103448276
+  }
+}

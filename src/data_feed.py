@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
@@ -57,9 +58,12 @@ def candles_from_ticks(ticks: list[dict], granularity: int) -> list[dict]:
 
 
 def save_candles_csv(df: pd.DataFrame, path: Path) -> None:
+    """Write the candles out atomically so a crash can never leave a truncated file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    df[CANDLE_COLUMNS].to_csv(path, index=False)
+    tmp = path.with_name(path.name + ".tmp")
+    df[CANDLE_COLUMNS].to_csv(tmp, index=False)
+    os.replace(tmp, path)
 
 
 def load_candles_csv(path: Path) -> pd.DataFrame:

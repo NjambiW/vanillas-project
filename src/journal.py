@@ -26,6 +26,44 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _t_stat(xs: list) -> Optional[float]:
+    """One-sample t statistic of `xs` against zero, or None when it is undefined."""
+    n = len(xs)
+    if n < 2:
+        return None
+    mean = sum(xs) / n
+    var = sum((x - mean) ** 2 for x in xs) / (n - 1)
+    if var <= 0:
+        return None
+    return mean / (var ** 0.5) / (n ** 0.5)
+
+
+# Trades before we will call an edge an edge, and before a t statistic means much.
+MIN_TRADES_FOR_AN_EDGE = 100
+
+
+def verdict(perf: dict) -> str:
+    """Plain reading of a `performance()` dict -- no praise for a small sample."""
+    trades = perf.get("trades") or 0
+    roi = perf.get("roi")
+    t_stat = perf.get("gross_t_stat")
+    if trades == 0:
+        return "No settled trades yet: there is nothing to judge."
+    head = (f"{trades} settled trades, ROI {roi:+.1%} after markup, "
+            f"win rate {perf['win_rate']:.1%}. ")
+    if trades < MIN_TRADES_FOR_AN_EDGE:
+        return (head + f"Fewer than {MIN_TRADES_FOR_AN_EDGE} trades, so this is a "
+                "smoke test, not evidence -- in either direction.")
+    if t_stat is None:
+        return head + "Not enough variation to test whether the result is skill."
+    if roi > 0 and t_stat >= 2:
+        return head + f"gross t = {t_stat:.2f} (>= 2): the edge survives pricing."
+    if roi > 0:
+        return head + (f"gross t = {t_stat:.2f} (< 2): positive, but a run this small "
+                       "is consistent with luck.")
+    return head + f"gross t = {t_stat:.2f}: no edge shown even before the markup."
+
+
 class Journal:
     def __init__(self, path: Union[str, Path] = ":memory:"):
         if str(path) != ":memory:":
@@ -93,6 +131,51 @@ class Journal:
             "avg_win": wins[1] / wins[0] if wins[0] else None,
             "avg_loss": losses[1] / losses[0] if losses[0] else None,
             "expectancy": total_profit / closed if closed else None,
+        }
+
+    def performance(self, strategy: Optional[str] = None) -> dict:
+        """Settled-trade performance, net of Deriv's markup.
+
+        The markup is charged on top of fair value at entry, so `markup_cost` is what
+        that charge was worth in money: stake x markup%. Adding it back gives the
+        `gross_*` figures -- what the same entries would have returned had the quote
+        been free -- which is how we separate a real edge from a pricing question.
+        """
+        sql = ("SELECT stake, markup_pct, profit FROM trades "
+               "WHERE status IN ('won','lost') AND profit IS NOT NULL")
+        params: tuple = ()
+        if strategy:
+            sql += " AND strategy=?"
+            params = (strategy,)
+        rows = self.db.execute(sql, params).fetchall()
+        if not rows:
+            return {"trades": 0, "win_rate": None, "total_profit": 0.0, "roi": None,
+                    "gross_roi": None, "gross_t_stat": None, "avg_markup_pct": None,
+                    "markup_cost": 0.0}
+
+        stakes = [float(s) for s, _, _ in rows]
+        markups = [(m if m is not None else 0.0) for _, m, _ in rows]
+        pnls = [float(p) for _, _, p in rows]
+        wins = [p for p in pnls if p > 0]
+
+        # markup_pct = ask/fair - 1, and the whole ask is the stake, so the part of the
+        # stake that was markup is ask - fair = ask * m/(100+m). Using ask*m here would
+        # exceed the stake itself on the deep-OTM rows, where m runs past 150%.
+        costs = [s * m / (100.0 + m) for s, m in zip(stakes, markups)]
+        total_stake = sum(stakes)
+        markup_cost = sum(costs)
+        total_profit = sum(pnls)
+        gross_rois = [(p + c) / (s - c)
+                      for p, s, c in zip(pnls, stakes, costs) if s - c > 0]
+        return {
+            "trades": len(rows),
+            "win_rate": len(wins) / len(rows),
+            "total_profit": total_profit,
+            "roi": total_profit / total_stake if total_stake else None,
+            "gross_roi": (sum(gross_rois) / len(gross_rois)) if gross_rois else None,
+            "gross_t_stat": _t_stat(gross_rois),
+            "avg_markup_pct": sum(markups) / len(markups),
+            "markup_cost": markup_cost,
         }
 
     def skip_reasons(self) -> list:

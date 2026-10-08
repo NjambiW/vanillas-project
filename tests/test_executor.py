@@ -106,7 +106,9 @@ def test_full_trade_from_signal_to_settlement():
         ex, client, risk, journal = build()
         trade_id = await ex.handle_signal(SIGNAL, 1000.0)
         assert trade_id is not None
-        assert client.proposal_args == [("VANILLALONGCALL", "+1.10", 1, "m", 10.0)]
+        # the executor quotes the nearest `max_candidates` barriers and keeps the cheapest
+        assert len(client.proposal_args) == 3
+        assert client.proposal_args[0][:2] == ("VANILLALONGCALL", "+1.10")
         assert client.bought == [("p1", 10.0)]
         await asyncio.sleep(0.01)                      # let the watcher subscribe
         client.sub_cb({"proposal_open_contract": {"is_sold": 1, "profit": "7.5"}})

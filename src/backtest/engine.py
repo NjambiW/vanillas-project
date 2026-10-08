@@ -19,16 +19,31 @@ so results are slightly optimistic.
 Options:
   risk_cfg        None  -> use RiskConfig.from_settings() (your config.py) if it can be loaded,
                            otherwise fall back to the min_stake/max_stake/max_risk_pct arguments
-                  False -> switch the live risk rules off
-                  a RiskConfig instance -> use that
+                   False -> switch the live risk rules off
+                   a RiskConfig instance -> use that
   max_markup_pct  "live" -> config.MAX_MARKUP_PCT (15.0 if config can't be loaded)
-                  None   -> premium gate off
-                  number -> that limit
+                   None   -> premium gate off
+                   number -> that limit
+  overlap         False -> NON-OVERLAPPING MODE: no new contract until the current one
+                           expires (this is the historical default)
+                   True  -> PORTFOLIO MODE: entries may overlap, capped by the risk
+                           config's `max_open_positions`, and equity is settled
+                           chronologically as contracts expire. With risk_cfg=False
+                           nothing caps the number of open positions.
 
-Minor simplification: a trade's result is booked on the day it was entered.
+Two modes exist because overlapping contracts are not independent observations. A
+five-candle contract entered on consecutive candles shares most of its future with its
+neighbour, so a portfolio-mode result can be inflated by dependence. Run both reports;
+if the result disappears in non-overlapping mode, dependence was making it look
+stronger than it was. `keep_nonoverlapping_entries` reports how many of a run's
+entries are independent, and `BacktestResult.independent_blocks()` counts them.
+
+Settlement: a contract's profit is booked when it expires, not when it is entered, so
+equity and the risk rules always see settled cash only.
 """
+import heapq
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -75,6 +90,14 @@ class BacktestResult:
     def to_frame(self) -> pd.DataFrame:
         return pd.DataFrame([t.__dict__ for t in self.trades])
 
+    def independent_blocks(self) -> int:
+        """Entries that survive non-overlapping filtering: the independent sample size."""
+        if not self.trades:
+            return 0
+        return len(keep_nonoverlapping_entries(
+            [t.index for t in self.trades], max(1, self.hold_candles)
+        ))
+
 
 # --------------------------------------------------------------------- helpers
 def _resolve_risk(risk_cfg):
@@ -109,6 +132,26 @@ def _size_stake(plan, balance: float, min_stake: float, max_stake: float, max_ri
     return stake
 
 
+def keep_nonoverlapping_entries(entries: list, hold_candles: int) -> list:
+    """Keep at most one open position.
+
+    If a trade enters at candle i and expires at i + hold_candles, the next accepted
+    entry is i + hold_candles or later. Returns the entries that survive, in order.
+    """
+    if hold_candles < 1:
+        raise ValueError("hold_candles must be positive")
+
+    accepted: list = []
+    next_available = -1
+
+    for entry in sorted(entries):
+        if entry >= next_available:
+            accepted.append(entry)
+            next_available = entry + hold_candles
+
+    return accepted
+
+
 class _RiskSim:
     """Replays RiskManager.approve_trade's limits against historical time."""
 
@@ -121,6 +164,7 @@ class _RiskSim:
         self.consec = 0
         self.halted = False
         self.last_entry = None
+        self.open_positions = 0
 
     def _roll(self, ts: float) -> None:
         day = int(ts // 86400)
@@ -146,6 +190,8 @@ class _RiskSim:
         if self.consec >= cfg.max_consecutive_losses:
             self.halted = True
             return "consecutive losses limit"
+        if self.open_positions >= cfg.max_open_positions:
+            return "a trade is already open"
         if self.trades >= cfg.max_trades_per_day:
             return "daily trade limit"
         if (cfg.min_seconds_between_trades > 0 and self.last_entry is not None
@@ -156,8 +202,10 @@ class _RiskSim:
     def opened(self, ts: float) -> None:
         self.trades += 1
         self.last_entry = ts
+        self.open_positions += 1
 
     def closed(self, profit: float) -> None:
+        self.open_positions = max(0, self.open_positions - 1)
         self.pnl += profit
         self.consec = self.consec + 1 if profit < 0 else 0
 
@@ -176,6 +224,8 @@ def run_backtest(
     max_markup_pct="live",
     max_candidates: int = 3,
     risk_cfg=None,
+    overlap: bool = False,
+    max_open_positions: int | None = None,
 ) -> BacktestResult:
     epoch = candles["epoch"].to_numpy()
     close = candles["close"].to_numpy(dtype=float)
@@ -187,6 +237,8 @@ def run_backtest(
     T = seconds / SECONDS_PER_YEAR
 
     cfg = _resolve_risk(risk_cfg)
+    if cfg is not None and max_open_positions is not None:
+        cfg = replace(cfg, max_open_positions=max_open_positions)
     if cfg is not None:
         min_stake, max_stake, max_risk_pct = cfg.min_stake, cfg.max_stake, cfg.max_risk_pct_per_trade
     sim = _RiskSim(cfg) if cfg is not None else None
@@ -199,9 +251,22 @@ def run_backtest(
     result = BacktestResult(balances=[balance], hold_candles=hold, strategy=strategy.name,
                             risk_applied=sim is not None)
     open_until = 0
+    pending: list = []               # heap of (expiry index, profit, stake) not settled yet
+
+    def settle(before) -> None:
+        """Book every contract that expired on or before candle `before`."""
+        nonlocal balance
+        while pending and (before is None or pending[0][0] <= before):
+            _, profit, stake = heapq.heappop(pending)
+            plan.record(profit)
+            balance += stake + profit           # the stake comes back with the payoff
+            result.balances.append(balance)
+            if sim is not None:
+                sim.closed(profit)
 
     for i in np.flatnonzero(signals):
-        if i < open_until:
+        settle(int(i))
+        if not overlap and i < open_until:
             continue
         j = i + hold
         if j >= n:
@@ -222,9 +287,12 @@ def run_backtest(
         unit = spot * sigma * math.sqrt(T)
         wanted = strategy.strike_atr * atr_now[i]
 
-        # 2. candidate strike levels nearest the wanted strike; take the cheapest (lowest markup)
+        # 2. candidate strike levels nearest the wanted strike; take the cheapest (lowest markup).
+        # Ties must resolve to the level closest to `wanted`, so min() has to keep `ranked`'s
+        # order -- min(markup, level) would instead break ties on the deeper ITM strike.
         ranked = sorted(LEVELS, key=lambda lv: abs(lv * unit - wanted))[:max(1, max_candidates)]
-        markup_pct, level = min((cost_model.markup_pct(seconds, lv), lv) for lv in ranked)
+        level = min(ranked, key=lambda lv: cost_model.markup_pct(seconds, lv))
+        markup_pct = cost_model.markup_pct(seconds, level)
 
         # 3. premium gate
         if markup_limit is not None and markup_pct > markup_limit:
@@ -261,11 +329,19 @@ def run_backtest(
                 roi_opposite=float(payoff_opp - 1.0),
             )
         )
-        plan.record(profit)
-        balance += profit
+        # Deriv takes the stake at purchase, not at settlement. Debiting it here is what
+        # makes portfolio mode honest: while a contract is open that money is gone, so
+        # the next stake is sized on what is actually left and the risk manager's day
+        # sees the real balance. Non-overlapping runs are unaffected -- they debit and
+        # are refunded around the same settlement, so only the balance curve gains the
+        # dip that the exposure really caused.
+        balance -= stake
         result.balances.append(balance)
+        heapq.heappush(pending, (int(j), float(profit), float(stake)))
         if sim is not None:
             sim.opened(float(epoch[i]))
-            sim.closed(profit)
-        open_until = j
+        if not overlap:
+            open_until = j
+
+    settle(None)
     return result

@@ -119,6 +119,45 @@ def test_only_one_trade_at_a_time():
     assert [t.index for t in res.trades] == [20, 23]
 
 
+def test_portfolio_mode_takes_the_stake_out_of_the_balance_at_entry():
+    """Deriv charges on purchase, so an open contract must not be spendable cash.
+
+    Before this the balance only moved at settlement, so portfolio mode sized the next
+    stake on money that was already committed, and drawdown looked shallower than the
+    exposure really was. Risk is switched off: this is a statement about accounting.
+    """
+    n = 60
+    signals = [0] * 10 + [1] * (n - 10)
+    rising = candles_from_closes([1000.0 + 0.5 * i for i in range(n)])
+
+    def run(overlap):
+        return run_backtest(rising, Stub(signals, hold=5), "1HZ100V", ZERO, FixedStake(1.0),
+                            start_balance=100.0, risk_cfg=False,
+                            overlap=overlap, max_open_positions=10)
+
+    together, alone = run(True), run(False)
+
+    assert len(together.trades) > 2 * len(alone.trades)      # the contracts really overlap
+    # every entry is booked immediately: start point + one dip + one refund per trade
+    assert len(together.balances) == 1 + 2 * len(together.trades)
+    assert len(alone.balances) == 1 + 2 * len(alone.trades)
+    # each rising market makes every settlement profitable, so the only downward steps
+    # are stake debits. One at a time when contracts cannot overlap, several in a row
+    # when they can -- which is exactly the exposure the old accounting hid.
+    def longest_drop_run(balances):
+        best = run_ = 0
+        for prev, cur in zip(balances, balances[1:]):
+            run_ = run_ + 1 if cur < prev else 0
+            best = max(best, run_)
+        return best
+
+    assert longest_drop_run(alone.balances) <= 1
+    assert longest_drop_run(together.balances) >= 2
+    # the money comes back with the payoff, so the end balance is still exact
+    assert abs(together.balances[-1]
+               - (100.0 + sum(t.profit for t in together.trades))) < 1e-9
+
+
 def test_gap_in_the_data_skips_the_trade():
     signals = [0] * 40
     signals[20] = 1
@@ -131,7 +170,10 @@ def test_random_trading_at_fair_prices_has_no_edge():
     candles = random_walk()
     rng = np.random.default_rng(7)
     signals = np.where(rng.random(len(candles)) < 0.2, rng.choice([-1, 1], len(candles)), 0)
-    res = run_backtest(candles, Stub(signals), "1HZ100V", ZERO, FixedStake(1.0), start_balance=1e6)
+    # risk_cfg=False: this is a statement about the pricing engine, and the live risk
+    # rules (daily trade cap, consecutive-loss halt) would truncate the sample instead.
+    res = run_backtest(candles, Stub(signals), "1HZ100V", ZERO, FixedStake(1.0), start_balance=1e6,
+                       risk_cfg=False)
     m = summarize(res.trades, res.balances)
     assert m["trades"] > 5000
     assert abs(m["roi"]) < 0.06           # pricing engine and random walk agree: fair game
@@ -141,7 +183,8 @@ def test_the_markup_is_what_costs_you():
     candles = random_walk()
     rng = np.random.default_rng(7)
     signals = np.where(rng.random(len(candles)) < 0.2, rng.choice([-1, 1], len(candles)), 0)
-    res = run_backtest(candles, Stub(signals), "1HZ100V", ONE_MIN_MEASURED, FixedStake(1.0), start_balance=1e6)
+    res = run_backtest(candles, Stub(signals), "1HZ100V", ONE_MIN_MEASURED, FixedStake(1.0),
+                       start_balance=1e6, risk_cfg=False)
     m = summarize(res.trades, res.balances)
     assert m["roi"] < -0.10               # 21% markup on a 1.21x price is about -17%
     assert abs(m["gross_roi"]) < 0.06     # before the markup it is still a fair game

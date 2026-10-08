@@ -58,6 +58,37 @@ def bollinger(close: pd.Series, n: int = 20, k: float = 2.0) -> pd.DataFrame:
     return pd.DataFrame({"mid": mid, "upper": upper, "lower": lower, "width": upper - lower})
 
 
+def adx(candles: pd.DataFrame, n: int = 14) -> pd.Series:
+    """Wilder's Average Directional Index (0-100), smoothed over n periods.
+
+    ADX quantifies trend strength. Readings below ~20 often imply a ranging market,
+    above ~25 a trending market. Values before sufficient data are NaN.
+    """
+    high = candles["high"]
+    low = candles["low"]
+    close = candles["close"]
+
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+    tr = true_range(candles)
+
+    trn = tr.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    pdm = plus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    mdm = minus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+
+    plus_di = pdm / trn.replace(0, np.nan) * 100.0
+    minus_di = mdm / trn.replace(0, np.nan) * 100.0
+
+    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100.0
+
+    adx_s = dx.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    return adx_s
+
+
 def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
     """MACD line, signal line and histogram."""
     line = ema(close, fast) - ema(close, slow)
